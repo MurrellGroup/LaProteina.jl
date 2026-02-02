@@ -1,0 +1,21 @@
+# Weights (too large for git)
+weights/
+*.npz
+
+# Julia artifacts
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Generated files
+generated_structures/
+test/samples/
+test/*.npy
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
