@@ -10,6 +10,10 @@ using ChainRulesCore
 using Distributions
 using Printf
 
+# Re-export Flowfusion types for convenience
+using Flowfusion
+using ForwardBackward: ContinuousState, tensor
+
 # Constants and utilities
 include("constants.jl")
 include("utils.jl")
@@ -30,8 +34,11 @@ include("nn/decoder.jl")
 # Data loading
 include("data/pdb_loading.jl")
 
-# Inference
+# Inference (legacy)
 include("inference.jl")
+
+# Flowfusion-based sampling
+include("flowfusion_sampling.jl")
 
 # Weight loading
 include("weights.jl")
@@ -92,13 +99,19 @@ export
     DecoderTransformer, decode,
     get_atom_mask_from_aatype,
 
-    # Inference
+    # Inference (legacy)
     get_schedule, get_gt,
     sample_rdn_noise,
     rdn_interpolate, rdn_ode_step, rdn_sde_step,
     vf_to_score, score_to_vf,
     full_simulation, sample, samples_to_pdb,
     fm_loss,
+
+    # Flowfusion-based sampling
+    RDNFlow, gen, bridge, step,
+    ContinuousState, tensor,
+    ScoreNetworkWrapper, MutableScoreNetworkWrapper,
+    generate_with_flowfusion, sample_with_flowfusion,
 
     # PDB I/O
     load_pdb, extract_ca_coords, batch_pdb_data, save_pdb,
