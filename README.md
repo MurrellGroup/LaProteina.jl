@@ -89,12 +89,11 @@ decoder = DecoderTransformer(
 )
 load_decoder_weights!(decoder, "weights/decoder.npz")
 
-# Generate a 50-residue protein
-L = 50  # sequence length
-B = 1   # batch size (number of samples)
+# Generate a 50-residue protein using Flowfusion's gen() API
+L = 50   # sequence length
+B = 3    # batch size (number of samples)
 
-# Run flow matching simulation
-flow_samples = full_simulation(score_net, L, B;
+flow_samples = generate_with_flowfusion(score_net, L, B;
     nsteps=100,
     self_cond=true,
     schedule_mode=:power,
@@ -119,6 +118,55 @@ samples = Dict(
     :mask => flow_samples[:mask]
 )
 samples_to_pdb(samples, "output/"; prefix="generated")
+```
+
+## Flowfusion Integration
+
+This package uses [Flowfusion.jl](https://github.com/MurrellGroup/Flowfusion.jl)'s `gen()` API for flow matching sampling. The integration provides:
+
+- **RDNFlow process**: Flow matching on (R^d)^n for CA coordinates (3D with zero COM) and latent representations (8D)
+- **gen() sampling**: Uses Flowfusion's standardized generation interface
+- **Model wrapper**: `MutableScoreNetworkWrapper` adapts the ScoreNetwork to Flowfusion's expected `model(t, Xt) -> X1_hat` signature
+
+### Using the Flowfusion API directly
+
+```julia
+using LaProteina
+using Flowfusion: RDNFlow, gen, ContinuousState, tensor
+
+# Create processes
+P_ca = RDNFlow(3; zero_com=true)      # CA coordinates
+P_ll = RDNFlow(8; zero_com=false)     # Latents
+P = (P_ca, P_ll)
+
+# Sample initial noise
+x0_ca = Flowfusion.sample_rdn_noise(P_ca, L, B)
+x0_ll = Flowfusion.sample_rdn_noise(P_ll, L, B)
+X0 = (ContinuousState(x0_ca), ContinuousState(x0_ll))
+
+# Create model wrapper
+model = MutableScoreNetworkWrapper(score_net, L, B; self_cond=true)
+
+# Generate with Flowfusion's gen()
+steps = Float32.(range(0, 1, length=101))  # Time steps
+X_final = gen(P, X0, model, steps)
+
+# Extract results
+ca_coords = tensor(X_final[1])
+latents = tensor(X_final[2])
+```
+
+### Legacy API
+
+The original `full_simulation` function is still available for backwards compatibility:
+
+```julia
+flow_samples = full_simulation(score_net, L, B;
+    nsteps=100,
+    self_cond=true,
+    schedule_mode=:power,
+    schedule_p=2.0
+)
 ```
 
 ## Architecture Details
@@ -148,7 +196,9 @@ A key difference from Flux.jl: this package uses `PyTorchLayerNorm` which comput
 | `PairBiasAttention` | AF3-style attention with pair bias |
 | `ProteINAAdaLN` | Adaptive LayerNorm with sigmoid gating |
 | `SwiGLUTransition` | SwiGLU feedforward with adaptive scaling |
-| `full_simulation` | ODE/SDE integration for sampling |
+| `generate_with_flowfusion` | Flowfusion gen() API sampling |
+| `MutableScoreNetworkWrapper` | Model wrapper for gen() |
+| `full_simulation` | Legacy ODE/SDE integration |
 
 ## Numerical Parity
 
@@ -167,7 +217,8 @@ LaProteina.jl/
 │   ├── JuProteina.jl          # Main module
 │   ├── constants.jl           # Amino acid constants
 │   ├── utils.jl               # Tensor utilities, PyTorchLayerNorm
-│   ├── inference.jl           # Flow matching sampling
+│   ├── inference.jl           # Legacy flow matching sampling
+│   ├── flowfusion_sampling.jl # Flowfusion gen() API integration
 │   ├── weights.jl             # Weight loading
 │   ├── features/
 │   │   ├── feature_factory.jl # Feature extraction

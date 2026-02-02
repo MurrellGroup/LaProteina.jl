@@ -1,7 +1,8 @@
 # Flowfusion API integration for protein generation
 # Uses gen() from Flowfusion.jl for sampling
 
-using Flowfusion
+import Flowfusion
+import Flowfusion: RDNFlow, gen
 using ForwardBackward: ContinuousState, tensor
 
 """
@@ -174,9 +175,9 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
     P_ll = RDNFlow(latent_dim; zero_com=false)  # Latents without zero COM
     P = (P_ca, P_ll)
 
-    # Sample initial noise
-    x0_ca = sample_rdn_noise(P_ca, L, B)      # [3, L, B]
-    x0_ll = sample_rdn_noise(P_ll, L, B)      # [latent_dim, L, B]
+    # Sample initial noise using Flowfusion's RDN noise sampler
+    x0_ca = Flowfusion.sample_rdn_noise(P_ca, L, B)      # [3, L, B]
+    x0_ll = Flowfusion.sample_rdn_noise(P_ll, L, B)      # [latent_dim, L, B]
 
     # Wrap as ContinuousStates
     X0 = (ContinuousState(x0_ca), ContinuousState(x0_ll))
