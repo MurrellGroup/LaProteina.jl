@@ -143,7 +143,9 @@ end
         latent_dim::Int=8,
         self_cond::Bool=true,
         schedule_mode::Symbol=:power,
-        schedule_p::Real=2.0)
+        schedule_p::Real=2.0,
+        sde_gt_mode::Symbol=:const,
+        sde_gt_param::Real=0.0)
 
 Generate samples using Flowfusion's gen() API.
 
@@ -156,23 +158,39 @@ Generate samples using Flowfusion's gen() API.
 - `self_cond`: Whether to use self-conditioning
 - `schedule_mode`: Time schedule (:uniform, :power, :log)
 - `schedule_p`: Schedule parameter
+- `sde_gt_mode`: Noise schedule for SDE sampling (:const, :tan, :linear, Symbol("1-t/t"), Symbol("1/t"))
+- `sde_gt_param`: Noise amplitude (0 = deterministic ODE, >0 = SDE with noise)
 
 # Returns
 Dict with:
 - :bb_ca => [3, L, B] generated CA coordinates
 - :local_latents => [latent_dim, L, B] generated latents
 - :mask => [L, B]
+
+# Example
+```julia
+# Deterministic ODE sampling (default)
+samples = generate_with_flowfusion(score_net, 100, 3)
+
+# SDE sampling with tangent noise schedule
+samples = generate_with_flowfusion(score_net, 100, 3;
+    sde_gt_mode=:tan,
+    sde_gt_param=0.5
+)
+```
 """
 function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
         nsteps::Int=100,
         latent_dim::Int=8,
         self_cond::Bool=true,
         schedule_mode::Symbol=:power,
-        schedule_p::Real=2.0)
+        schedule_p::Real=2.0,
+        sde_gt_mode::Symbol=:const,
+        sde_gt_param::Real=0.0)
 
-    # Create RDNFlow processes
-    P_ca = RDNFlow(3; zero_com=true)      # CA coords with zero COM
-    P_ll = RDNFlow(latent_dim; zero_com=false)  # Latents without zero COM
+    # Create RDNFlow processes with SDE parameters
+    P_ca = RDNFlow(3; zero_com=true, sde_gt_mode=sde_gt_mode, sde_gt_param=sde_gt_param)
+    P_ll = RDNFlow(latent_dim; zero_com=false, sde_gt_mode=sde_gt_mode, sde_gt_param=sde_gt_param)
     P = (P_ca, P_ll)
 
     # Sample initial noise using Flowfusion's RDN noise sampler
@@ -221,7 +239,9 @@ function sample_with_flowfusion(score_net::ScoreNetwork, decoder::DecoderTransfo
         latent_dim::Int=8,
         self_cond::Bool=true,
         schedule_mode::Symbol=:power,
-        schedule_p::Real=2.0)
+        schedule_p::Real=2.0,
+        sde_gt_mode::Symbol=:const,
+        sde_gt_param::Real=0.0)
 
     # Generate with Flowfusion
     flow_samples = generate_with_flowfusion(score_net, L, B;
@@ -229,7 +249,9 @@ function sample_with_flowfusion(score_net::ScoreNetwork, decoder::DecoderTransfo
         latent_dim=latent_dim,
         self_cond=self_cond,
         schedule_mode=schedule_mode,
-        schedule_p=schedule_p)
+        schedule_p=schedule_p,
+        sde_gt_mode=sde_gt_mode,
+        sde_gt_param=sde_gt_param)
 
     ca_coords = flow_samples[:bb_ca]
     latents = flow_samples[:local_latents]
