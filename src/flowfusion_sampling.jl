@@ -138,28 +138,37 @@ function (wrapper::MutableScoreNetworkWrapper)(t, Xₜ)
 end
 
 """
-    generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
-        nsteps::Int=100,
-        latent_dim::Int=8,
-        self_cond::Bool=true,
-        schedule_mode::Symbol=:power,
-        schedule_p::Real=2.0,
-        sde_gt_mode::Symbol=:const,
-        sde_gt_param::Real=0.0)
+    generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int; kwargs...)
 
-Generate samples using Flowfusion's gen() API.
+Generate samples using Flowfusion's gen() API with la-proteina default settings.
 
 # Arguments
 - `score_net`: Trained ScoreNetwork
 - `L`: Sequence length
 - `B`: Batch size (number of samples)
-- `nsteps`: Number of integration steps
-- `latent_dim`: Dimension of local latents
-- `self_cond`: Whether to use self-conditioning
-- `schedule_mode`: Time schedule (:uniform, :power, :log)
-- `schedule_p`: Schedule parameter
-- `sde_gt_mode`: Noise schedule for SDE sampling (:const, :tan, :linear, Symbol("1-t/t"), Symbol("1/t"))
-- `sde_gt_param`: Noise amplitude (0 = deterministic ODE, >0 = SDE with noise)
+
+# Keyword Arguments
+- `nsteps::Int=400`: Number of integration steps
+- `latent_dim::Int=8`: Dimension of local latents
+- `self_cond::Bool=true`: Whether to use self-conditioning
+
+## BB_CA settings (backbone CA coordinates):
+- `ca_schedule_mode::Symbol=:log`: Time schedule for CA
+- `ca_schedule_p::Real=2.0`: Schedule parameter
+- `ca_gt_mode::Symbol=Symbol("1/t")`: Noise schedule mode
+- `ca_gt_param::Real=1.0`: Base noise parameter
+- `ca_sc_scale_noise::Real=0.1`: Noise scaling (0 = ODE)
+- `ca_sc_scale_score::Real=1.0`: Score scaling
+- `ca_t_lim_ode::Real=0.98`: Switch to ODE above this t
+
+## Local latents settings:
+- `ll_schedule_mode::Symbol=:power`: Time schedule for latents
+- `ll_schedule_p::Real=2.0`: Schedule parameter
+- `ll_gt_mode::Symbol=:tan`: Noise schedule mode
+- `ll_gt_param::Real=1.0`: Base noise parameter
+- `ll_sc_scale_noise::Real=0.1`: Noise scaling (0 = ODE)
+- `ll_sc_scale_score::Real=1.0`: Score scaling
+- `ll_t_lim_ode::Real=0.98`: Switch to ODE above this t
 
 # Returns
 Dict with:
@@ -169,28 +178,54 @@ Dict with:
 
 # Example
 ```julia
-# Deterministic ODE sampling (default)
+# Default la-proteina SDE sampling
 samples = generate_with_flowfusion(score_net, 100, 3)
 
-# SDE sampling with tangent noise schedule
+# ODE-only sampling (no noise)
 samples = generate_with_flowfusion(score_net, 100, 3;
-    sde_gt_mode=:tan,
-    sde_gt_param=0.5
+    ca_sc_scale_noise=0.0,
+    ll_sc_scale_noise=0.0
 )
 ```
 """
 function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
-        nsteps::Int=100,
+        nsteps::Int=400,
         latent_dim::Int=8,
         self_cond::Bool=true,
-        schedule_mode::Symbol=:power,
-        schedule_p::Real=2.0,
-        sde_gt_mode::Symbol=:const,
-        sde_gt_param::Real=0.0)
+        # BB_CA settings (la-proteina defaults)
+        ca_schedule_mode::Symbol=:log,
+        ca_schedule_p::Real=2.0,
+        ca_gt_mode::Symbol=Symbol("1/t"),
+        ca_gt_param::Real=1.0,
+        ca_sc_scale_noise::Real=0.1,
+        ca_sc_scale_score::Real=1.0,
+        ca_t_lim_ode::Real=0.98,
+        # Local latents settings (la-proteina defaults)
+        ll_schedule_mode::Symbol=:power,
+        ll_schedule_p::Real=2.0,
+        ll_gt_mode::Symbol=:tan,
+        ll_gt_param::Real=1.0,
+        ll_sc_scale_noise::Real=0.1,
+        ll_sc_scale_score::Real=1.0,
+        ll_t_lim_ode::Real=0.98)
 
-    # Create RDNFlow processes with SDE parameters
-    P_ca = RDNFlow(3; zero_com=true, sde_gt_mode=sde_gt_mode, sde_gt_param=sde_gt_param)
-    P_ll = RDNFlow(latent_dim; zero_com=false, sde_gt_mode=sde_gt_mode, sde_gt_param=sde_gt_param)
+    # Create RDNFlow processes with per-modality SDE parameters
+    P_ca = RDNFlow(3;
+        zero_com=true,
+        sde_gt_mode=ca_gt_mode,
+        sde_gt_param=ca_gt_param,
+        sc_scale_noise=ca_sc_scale_noise,
+        sc_scale_score=ca_sc_scale_score,
+        t_lim_ode=ca_t_lim_ode
+    )
+    P_ll = RDNFlow(latent_dim;
+        zero_com=false,
+        sde_gt_mode=ll_gt_mode,
+        sde_gt_param=ll_gt_param,
+        sc_scale_noise=ll_sc_scale_noise,
+        sc_scale_score=ll_sc_scale_score,
+        t_lim_ode=ll_t_lim_ode
+    )
     P = (P_ca, P_ll)
 
     # Sample initial noise using Flowfusion's RDN noise sampler
@@ -200,8 +235,10 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
     # Wrap as ContinuousStates
     X0 = (ContinuousState(x0_ca), ContinuousState(x0_ll))
 
-    # Create time steps
-    steps = Float32.(get_schedule(schedule_mode, nsteps; p=schedule_p))
+    # Create time steps - use CA schedule (both modalities use same time steps in gen)
+    # Note: la-proteina uses different schedules per modality, but gen() uses shared steps
+    # We use CA schedule as primary since coordinates are more sensitive
+    steps = Float32.(get_schedule(ca_schedule_mode, nsteps; p=ca_schedule_p))
 
     # Create model wrapper
     model = MutableScoreNetworkWrapper(score_net, L, B; self_cond=self_cond)
@@ -228,30 +265,16 @@ end
 
 Generate protein structures using Flowfusion's gen() API and decode to all-atom.
 
-See generate_with_flowfusion for arguments.
+See generate_with_flowfusion for all available keyword arguments.
 
 # Returns
 Dict with all-atom structure information.
 """
 function sample_with_flowfusion(score_net::ScoreNetwork, decoder::DecoderTransformer,
-        L::Int, B::Int;
-        nsteps::Int=100,
-        latent_dim::Int=8,
-        self_cond::Bool=true,
-        schedule_mode::Symbol=:power,
-        schedule_p::Real=2.0,
-        sde_gt_mode::Symbol=:const,
-        sde_gt_param::Real=0.0)
+        L::Int, B::Int; kwargs...)
 
-    # Generate with Flowfusion
-    flow_samples = generate_with_flowfusion(score_net, L, B;
-        nsteps=nsteps,
-        latent_dim=latent_dim,
-        self_cond=self_cond,
-        schedule_mode=schedule_mode,
-        schedule_p=schedule_p,
-        sde_gt_mode=sde_gt_mode,
-        sde_gt_param=sde_gt_param)
+    # Generate with Flowfusion - pass through all kwargs
+    flow_samples = generate_with_flowfusion(score_net, L, B; kwargs...)
 
     ca_coords = flow_samples[:bb_ca]
     latents = flow_samples[:local_latents]
