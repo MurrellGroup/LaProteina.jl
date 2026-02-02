@@ -4,11 +4,15 @@ version = "0.1.0"
 authors = ["JuProteina contributors"]
 
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 BioStructures = "de9282ab-8554-53be-b2d6-f6c222edabfc"
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Flowfusion = "5b4e93c8-7b6e-4682-b400-fc3b238f52b1"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+Functors = "d9f16b24-f501-4c13-a1f2-28368ffc5196"
 ForwardBackward = "e879419d-bb0f-4252-adee-d266c51ac92d"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"

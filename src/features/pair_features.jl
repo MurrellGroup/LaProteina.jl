@@ -40,9 +40,9 @@ function pairwise_distances(x::AbstractArray{T,3}) where T
 end
 
 """
-    bin_values(tensor::AbstractArray{T}, bin_limits::AbstractVector{T}) where T
+    bin_values(tensor::AbstractArray{T}, bin_limits::AbstractVector) where T
 
-Bin values and convert to one-hot encoding.
+Bin values and convert to one-hot encoding. GPU-compatible implementation.
 
 # Arguments
 - `tensor`: Input tensor of any shape
@@ -55,19 +55,44 @@ Bin values and convert to one-hot encoding.
 function bin_values(tensor::AbstractArray{T}, bin_limits::AbstractVector) where T
     n_bins = length(bin_limits) + 1
 
-    # Find bin indices (1-indexed)
-    bin_indices = ones(Int, size(tensor))
-    for (i, limit) in enumerate(bin_limits)
-        bin_indices .+= (tensor .> T(limit))
-    end
+    # Adapt bin_limits to same device as tensor
+    limits_dev = similar(tensor, length(bin_limits))
+    copyto!(limits_dev, T.(bin_limits))
 
-    # Convert to one-hot
+    # Compute bin indices using cumulative sum of comparisons
+    # bin_index = 1 + sum(tensor > limit_i for all i)
+    # This gives bin 1 for smallest values, bin n_bins for largest
+
+    # Reshape limits for broadcasting: [n_limits, 1, 1, ...]
+    ndim_tensor = ndims(tensor)
+    limits_shape = (length(bin_limits), ntuple(_ -> 1, ndim_tensor)...)
+    limits_reshaped = reshape(limits_dev, limits_shape...)
+
+    # Reshape tensor for broadcasting: [1, size(tensor)...]
+    tensor_reshaped = reshape(tensor, 1, size(tensor)...)
+
+    # Compare tensor to each limit: [n_limits, size(tensor)...]
+    # comparisons[i, ...] = 1 if tensor > limits[i], else 0
+    comparisons = T.(tensor_reshaped .> limits_reshaped)
+
+    # Sum along first dim to get bin indices (0-based, then add 1)
+    bin_indices = dropdims(sum(comparisons; dims=1); dims=1) .+ one(T)  # [size(tensor)...]
+
+    # Convert to one-hot using NNlib.onehotbatch-style approach
+    # Create result tensor
     result_shape = (n_bins, size(tensor)...)
-    result = zeros(T, result_shape)
-    for idx in CartesianIndices(tensor)
-        bin_idx = bin_indices[idx]
-        result[bin_idx, idx] = one(T)
-    end
+    result = similar(tensor, result_shape)
+    fill!(result, zero(T))
+
+    # For each bin, create a mask and set values
+    # Use broadcasting: result[b, ...] = (bin_indices == b)
+    bin_range_cpu = T.(1:n_bins)
+    bin_range_dev = similar(tensor, n_bins)
+    copyto!(bin_range_dev, bin_range_cpu)
+    bin_range = reshape(bin_range_dev, n_bins, ntuple(_ -> 1, ndim_tensor)...)
+    bin_indices_exp = reshape(bin_indices, 1, size(bin_indices)...)
+
+    result .= T.(bin_range .== bin_indices_exp)
 
     return result
 end

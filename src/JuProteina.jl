@@ -9,10 +9,15 @@ using NNlib
 using ChainRulesCore
 using Distributions
 using Printf
+using CUDA
+using cuDNN
 
 # Re-export Flowfusion types for convenience
 using Flowfusion
 using ForwardBackward: ContinuousState, tensor
+
+# Re-export Flux's gpu/cpu for device management
+using Flux: gpu, cpu
 
 # Constants and utilities
 include("constants.jl")
@@ -112,6 +117,9 @@ export
     ContinuousState, tensor,
     ScoreNetworkWrapper, MutableScoreNetworkWrapper,
     generate_with_flowfusion, sample_with_flowfusion,
+
+    # GPU support
+    gpu, cpu,
 
     # PDB I/O
     load_pdb, extract_ca_coords, batch_pdb_data, save_pdb,

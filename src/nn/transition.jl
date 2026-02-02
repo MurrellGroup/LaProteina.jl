@@ -2,6 +2,7 @@
 # Port of seq_transition_af3.py from la-proteina
 
 using Flux
+using Functors
 using NNlib: swish
 
 """
@@ -16,7 +17,8 @@ where x and g are the first and second halves of the input.
 """
 struct SwiGLU end
 
-Flux.@layer SwiGLU
+# Empty struct - mark as leaf so Functors doesn't try to traverse it
+Functors.@leaf SwiGLU
 
 function (::SwiGLU)(x)
     # x: [2*dim, ...]

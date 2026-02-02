@@ -4,6 +4,7 @@
 import Flowfusion
 import Flowfusion: RDNFlow, gen
 using ForwardBackward: ContinuousState, tensor
+using Flux: cpu, gpu
 
 """
     ScoreNetworkWrapper
@@ -79,62 +80,78 @@ end
     MutableScoreNetworkWrapper
 
 Mutable wrapper to allow self-conditioning state updates during gen().
+Supports GPU acceleration via device function.
 """
-mutable struct MutableScoreNetworkWrapper
+mutable struct MutableScoreNetworkWrapper{D}
     score_net::ScoreNetwork
     L::Int
     B::Int
     self_cond::Bool
-    x_sc::Union{Nothing, Tuple{Array{Float32,3}, Array{Float32,3}}}
+    dev::D  # Device function: gpu or identity for CPU
+    x_sc::Union{Nothing, Tuple{AbstractArray{Float32,3}, AbstractArray{Float32,3}}}
 end
 
-function MutableScoreNetworkWrapper(score_net::ScoreNetwork, L::Int, B::Int; self_cond::Bool=true)
-    MutableScoreNetworkWrapper(score_net, L, B, self_cond, nothing)
+function MutableScoreNetworkWrapper(score_net::ScoreNetwork, L::Int, B::Int;
+                                     self_cond::Bool=true, dev=identity)
+    MutableScoreNetworkWrapper(score_net, L, B, self_cond, dev, nothing)
 end
 
 function (wrapper::MutableScoreNetworkWrapper)(t, Xₜ)
-    # Unpack states
+    # Unpack states - these come from Flowfusion on CPU
     X_ca, X_ll = Xₜ
-    x_ca = tensor(X_ca)
-    x_ll = tensor(X_ll)
+    x_ca = tensor(X_ca)  # [3, L, B] on CPU
+    x_ll = tensor(X_ll)  # [8, L, B] on CPU
 
     L = wrapper.L
     B = wrapper.B
-    mask = ones(Float32, L, B)
+    dev = wrapper.dev
 
-    # Build batch dict
+    # Create mask and time vector
+    mask = ones(Float32, L, B)
     t_vec = fill(Float32(t), B)
+
+    # Move data to device for model forward pass
+    x_ca_dev = dev(x_ca)
+    x_ll_dev = dev(x_ll)
+    mask_dev = dev(mask)
+    t_vec_dev = dev(t_vec)
+
+    # Build batch dict on device
     batch = Dict{Symbol, Any}(
-        :x_t => Dict(:bb_ca => x_ca, :local_latents => x_ll),
-        :t => Dict(:bb_ca => t_vec, :local_latents => t_vec),
-        :mask => mask
+        :x_t => Dict(:bb_ca => x_ca_dev, :local_latents => x_ll_dev),
+        :t => Dict(:bb_ca => t_vec_dev, :local_latents => t_vec_dev),
+        :mask => mask_dev
     )
 
-    # Add self-conditioning
+    # Add self-conditioning on device
     if wrapper.self_cond && !isnothing(wrapper.x_sc)
         batch[:x_sc] = Dict(:bb_ca => wrapper.x_sc[1], :local_latents => wrapper.x_sc[2])
     end
 
-    # Call ScoreNetwork
+    # Call ScoreNetwork on device
     output = wrapper.score_net(batch)
 
-    # Extract X̂₁
+    # Extract X̂₁ on device
     if wrapper.score_net.output_param == :v
         v_ca = output[:bb_ca][:v]
         v_ll = output[:local_latents][:v]
-        x1_ca = v_to_x1(x_ca, v_ca, t)
-        x1_ll = v_to_x1(x_ll, v_ll, t)
+        x1_ca_dev = v_to_x1(x_ca_dev, v_ca, t)
+        x1_ll_dev = v_to_x1(x_ll_dev, v_ll, t)
     else
-        x1_ca = output[:bb_ca][:x1]
-        x1_ll = output[:local_latents][:x1]
+        x1_ca_dev = output[:bb_ca][:x1]
+        x1_ll_dev = output[:local_latents][:x1]
     end
 
-    # Update self-conditioning state
+    # Update self-conditioning state (keep on device for next iteration)
     if wrapper.self_cond
-        wrapper.x_sc = (x1_ca, x1_ll)
+        wrapper.x_sc = (x1_ca_dev, x1_ll_dev)
     end
 
-    return (ContinuousState(x1_ca), ContinuousState(x1_ll))
+    # Move back to CPU for Flowfusion's step function
+    x1_ca_cpu = cpu(x1_ca_dev)
+    x1_ll_cpu = cpu(x1_ll_dev)
+
+    return (ContinuousState(x1_ca_cpu), ContinuousState(x1_ll_cpu))
 end
 
 """
@@ -143,7 +160,7 @@ end
 Generate samples using Flowfusion's gen() API with la-proteina default settings.
 
 # Arguments
-- `score_net`: Trained ScoreNetwork
+- `score_net`: Trained ScoreNetwork (can be on GPU)
 - `L`: Sequence length
 - `B`: Batch size (number of samples)
 
@@ -151,6 +168,7 @@ Generate samples using Flowfusion's gen() API with la-proteina default settings.
 - `nsteps::Int=400`: Number of integration steps
 - `latent_dim::Int=8`: Dimension of local latents
 - `self_cond::Bool=true`: Whether to use self-conditioning
+- `dev=identity`: Device function (use `gpu` for GPU acceleration)
 
 ## BB_CA settings (backbone CA coordinates):
 - `ca_schedule_mode::Symbol=:log`: Time schedule for CA
@@ -172,14 +190,18 @@ Generate samples using Flowfusion's gen() API with la-proteina default settings.
 
 # Returns
 Dict with:
-- :bb_ca => [3, L, B] generated CA coordinates
-- :local_latents => [latent_dim, L, B] generated latents
+- :bb_ca => [3, L, B] generated CA coordinates (on CPU)
+- :local_latents => [latent_dim, L, B] generated latents (on CPU)
 - :mask => [L, B]
 
 # Example
 ```julia
-# Default la-proteina SDE sampling
+# CPU sampling (default)
 samples = generate_with_flowfusion(score_net, 100, 3)
+
+# GPU sampling
+score_net_gpu = score_net |> gpu
+samples = generate_with_flowfusion(score_net_gpu, 100, 3; dev=gpu)
 
 # ODE-only sampling (no noise)
 samples = generate_with_flowfusion(score_net, 100, 3;
@@ -192,6 +214,7 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
         nsteps::Int=400,
         latent_dim::Int=8,
         self_cond::Bool=true,
+        dev=identity,
         # BB_CA settings (la-proteina defaults)
         ca_schedule_mode::Symbol=:log,
         ca_schedule_p::Real=2.0,
@@ -228,11 +251,11 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
     )
     P = (P_ca, P_ll)
 
-    # Sample initial noise using Flowfusion's RDN noise sampler
+    # Sample initial noise using Flowfusion's RDN noise sampler (on CPU)
     x0_ca = Flowfusion.sample_rdn_noise(P_ca, L, B)      # [3, L, B]
     x0_ll = Flowfusion.sample_rdn_noise(P_ll, L, B)      # [latent_dim, L, B]
 
-    # Wrap as ContinuousStates
+    # Wrap as ContinuousStates (on CPU - Flowfusion operates on CPU)
     X0 = (ContinuousState(x0_ca), ContinuousState(x0_ll))
 
     # Create time steps - use CA schedule (both modalities use same time steps in gen)
@@ -240,13 +263,14 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
     # We use CA schedule as primary since coordinates are more sensitive
     steps = Float32.(get_schedule(ca_schedule_mode, nsteps; p=ca_schedule_p))
 
-    # Create model wrapper
-    model = MutableScoreNetworkWrapper(score_net, L, B; self_cond=self_cond)
+    # Create model wrapper with device function
+    model = MutableScoreNetworkWrapper(score_net, L, B; self_cond=self_cond, dev=dev)
 
     # Run generation with Flowfusion's gen()
+    # gen() operates on CPU, model wrapper handles GPU transfer internally
     X_final = gen(P, X0, model, steps)
 
-    # Extract final states
+    # Extract final states (already on CPU from gen())
     x_ca = tensor(X_final[1])
     x_ll = tensor(X_final[2])
 
@@ -268,33 +292,34 @@ Generate protein structures using Flowfusion's gen() API and decode to all-atom.
 See generate_with_flowfusion for all available keyword arguments.
 
 # Returns
-Dict with all-atom structure information.
+Dict with all-atom structure information (all on CPU).
 """
 function sample_with_flowfusion(score_net::ScoreNetwork, decoder::DecoderTransformer,
-        L::Int, B::Int; kwargs...)
+        L::Int, B::Int; dev=identity, kwargs...)
 
     # Generate with Flowfusion - pass through all kwargs
-    flow_samples = generate_with_flowfusion(score_net, L, B; kwargs...)
+    flow_samples = generate_with_flowfusion(score_net, L, B; dev=dev, kwargs...)
 
     ca_coords = flow_samples[:bb_ca]
     latents = flow_samples[:local_latents]
     mask = flow_samples[:mask]
 
-    # Decode to all-atom
+    # Decode to all-atom (move to device if needed)
     dec_input = Dict(
-        :z_latent => latents,
-        :ca_coors => ca_coords,
-        :mask => mask
+        :z_latent => dev(latents),
+        :ca_coors => dev(ca_coords),
+        :mask => dev(mask)
     )
     dec_out = decoder(dec_input)
 
+    # Move outputs to CPU
     return Dict(
         :ca_coords => ca_coords,
         :latents => latents,
-        :seq_logits => dec_out[:seq_logits],
-        :all_atom_coords => dec_out[:coors],
-        :aatype => dec_out[:aatype_max],
-        :atom_mask => dec_out[:atom_mask],
+        :seq_logits => cpu(dec_out[:seq_logits]),
+        :all_atom_coords => cpu(dec_out[:coors]),
+        :aatype => cpu(dec_out[:aatype_max]),
+        :atom_mask => cpu(dec_out[:atom_mask]),
         :mask => mask
     )
 end

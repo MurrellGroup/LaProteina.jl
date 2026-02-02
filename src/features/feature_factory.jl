@@ -2,6 +2,8 @@
 # Port of feature_factory.py
 
 using Flux
+using Functors
+using Adapt
 
 """
 Abstract type for feature extractors.
@@ -497,7 +499,8 @@ struct FeatureFactory
     out_dim::Int    # Output dimension (needed for ret_zero mode)
 end
 
-Flux.@layer FeatureFactory
+# Only traverse projection and ln for GPU transfer - features is just config
+Functors.@functor FeatureFactory (projection, ln)
 
 """
     FeatureFactory(features::Vector{<:Feature}, out_dim::Int; mode::Symbol=:seq, use_ln::Bool=false)
@@ -531,18 +534,38 @@ function (ff::FeatureFactory)(batch::Dict)
     # Determine L and B from batch
     L, B = _get_dims(batch)
 
-    # If ret_zero mode, just return zeros
+    # Determine target device from batch data
+    target_array = _get_reference_array(batch)
+
+    # If ret_zero mode, just return zeros on the same device
     if ff.ret_zero
         if ff.mode == :seq
-            return zeros(Float32, ff.out_dim, L, B)
+            result = similar(target_array, Float32, ff.out_dim, L, B)
+            fill!(result, zero(Float32))
+            return result
         else  # :pair
-            return zeros(Float32, ff.out_dim, L, L, B)
+            result = similar(target_array, Float32, ff.out_dim, L, L, B)
+            fill!(result, zero(Float32))
+            return result
         end
     end
 
-    # Extract and concatenate features
+    # Extract features
     feats = [f(batch, L, B) for f in ff.features]
-    combined = cat(feats...; dims=1)  # Concatenate along feature dimension
+
+    # Check if target is on GPU (CuArray)
+    is_gpu = !(target_array isa Array)
+
+    # Ensure all features are on the same device as target
+    feats_same_device = if is_gpu
+        # Move all features to GPU
+        map(f -> f isa Array ? Flux.gpu(f) : f, feats)
+    else
+        # Move all features to CPU
+        map(f -> f isa Array ? f : Array(f), feats)
+    end
+
+    combined = cat(feats_same_device...; dims=1)  # Concatenate along feature dimension
 
     # Project
     out = ff.projection(combined)
@@ -596,6 +619,32 @@ function _get_dims(batch::Dict)
         return size(v, 1), size(v, 2)
     end
     error("Cannot determine dimensions from batch")
+end
+
+"""
+Helper to get a reference array from batch to determine device.
+"""
+function _get_reference_array(batch::Dict)
+    # Try various keys to get a reference array
+    if haskey(batch, :z_latent)
+        return batch[:z_latent]
+    elseif haskey(batch, :ca_coors)
+        return batch[:ca_coors]
+    elseif haskey(batch, :ca_coors_nm)
+        return batch[:ca_coors_nm]
+    elseif haskey(batch, :x_t)
+        if haskey(batch[:x_t], :bb_ca)
+            return batch[:x_t][:bb_ca]
+        elseif haskey(batch[:x_t], :local_latents)
+            return batch[:x_t][:local_latents]
+        end
+    elseif haskey(batch, :coords)
+        return batch[:coords]
+    elseif haskey(batch, :mask)
+        return batch[:mask]
+    end
+    # Default to CPU array
+    return zeros(Float32, 1)
 end
 
 # ============================================================================
