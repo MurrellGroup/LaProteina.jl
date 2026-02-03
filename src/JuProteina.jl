@@ -37,6 +37,7 @@ include("nn/transformer_block.jl")
 include("nn/score_network.jl")
 include("nn/score_network_efficient.jl")
 include("nn/encoder.jl")
+include("nn/encoder_efficient.jl")
 include("nn/decoder.jl")
 
 # Data loading
@@ -124,6 +125,12 @@ export
 
     # Encoder
     EncoderTransformer, encode,
+    # Efficient frozen encoder for training
+    EncoderRawFeatures, extract_encoder_features, encode_from_features_gpu,
+    encode_frozen_efficient, prepare_encoder_batch_cpu, flow_matching_batch_gpu,
+    # Pre-computed encoder outputs for fast training
+    PrecomputedSample, precompute_encoder_outputs, flow_matching_batch_from_precomputed,
+    efficient_flow_loss_gpu,
 
     # Decoder
     DecoderTransformer, decode,
