@@ -1,17 +1,17 @@
 # PDB file loading utilities
 # Uses BioStructures.jl for parsing
 
-import BioStructures: read, PDBFormat, collectresidues, standardselector,
+import BioStructures: read, PDBFormat, MMCIFFormat, collectresidues, standardselector,
                       collectatoms, resname, atomname
 import BioStructures: coords as bio_coords
 
 """
     load_pdb(filepath::String; chain_id::String="A")
 
-Load a PDB file and extract protein structure data.
+Load a PDB or mmCIF file and extract protein structure data.
 
 # Arguments
-- `filepath`: Path to PDB file
+- `filepath`: Path to PDB or CIF file (format auto-detected from extension)
 - `chain_id`: Chain ID to extract (default "A")
 
 # Returns
@@ -23,7 +23,13 @@ Dict with:
 - :sequence => amino acid sequence string
 """
 function load_pdb(filepath::String; chain_id::String="A")
-    struc = read(filepath, PDBFormat)
+    # Auto-detect format from extension
+    ext = lowercase(splitext(filepath)[2])
+    if ext in [".cif", ".mmcif"]
+        struc = read(filepath, MMCIFFormat)
+    else
+        struc = read(filepath, PDBFormat)
+    end
 
     # Get chain
     chain = struc[chain_id]
