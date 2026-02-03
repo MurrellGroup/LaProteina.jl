@@ -353,3 +353,48 @@ function load_decoder_weights!(model::DecoderTransformer, weights_path::String)
 
     return model
 end
+
+"""
+    load_encoder_weights!(model::EncoderTransformer, weights_path::String)
+
+Load pretrained weights into EncoderTransformer from NPZ file.
+"""
+function load_encoder_weights!(model::EncoderTransformer, weights_path::String)
+    weights = npzread(weights_path)
+
+    # init_repr_factory
+    w = _get_w(weights, "init_repr_factory.linear_out.weight")
+    if !isnothing(w)
+        model.init_repr_factory.projection.weight .= w
+    end
+
+    # pair_rep_factory
+    w = _get_w(weights, "pair_rep_factory.linear_out.weight")
+    if !isnothing(w)
+        model.pair_rep_factory.projection.weight .= w
+    end
+
+    # transition_c_1, transition_c_2
+    _load_conditioning_transition!(model.transition_c_1, weights, "transition_c_1.")
+    _load_conditioning_transition!(model.transition_c_2, weights, "transition_c_2.")
+
+    # transformer_layers
+    for (i, layer) in enumerate(model.transformer_layers)
+        prefix = "transformer_layers.$(i-1)."
+        _load_transformer_block!(layer, weights, prefix)
+    end
+
+    # latent_proj: LayerNorm + Dense (called latent_decoder_mean_n_log_scale in Python)
+    w = _get_w(weights, "latent_decoder_mean_n_log_scale.0.weight")
+    b = _get_w(weights, "latent_decoder_mean_n_log_scale.0.bias")
+    if !isnothing(w) && !isnothing(b)
+        model.latent_proj.layers[1].scale .= w
+        model.latent_proj.layers[1].bias .= b
+    end
+    w = _get_w(weights, "latent_decoder_mean_n_log_scale.1.weight")
+    if !isnothing(w)
+        model.latent_proj.layers[2].weight .= w
+    end
+
+    return model
+end

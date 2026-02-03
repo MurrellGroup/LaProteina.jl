@@ -318,6 +318,239 @@ function (f::CACoordFeature)(batch::Dict, L::Int, B::Int)
 end
 
 # ============================================================================
+# Encoder Sequence Features (for x1 encoding)
+# ============================================================================
+
+"""
+    ChainBreakFeature()
+
+Feature indicating if residue is followed by a chain break.
+Detects breaks by CA-CA distance > 0.4nm (4.0 Å).
+Returns shape [1, L, B].
+"""
+struct ChainBreakFeature <: Feature
+    dim::Int
+end
+
+ChainBreakFeature() = ChainBreakFeature(1)
+
+function (f::ChainBreakFeature)(batch::Dict, L::Int, B::Int)
+    # Check if chain_breaks_per_residue is provided
+    if haskey(batch, :chain_breaks_per_residue)
+        breaks = batch[:chain_breaks_per_residue]  # [L, B]
+        return reshape(Float32.(breaks), 1, L, B)
+    end
+
+    # Python returns zeros when chain_breaks_per_residue is not in batch
+    # (with strict_feats=False, which is the default for the encoder)
+    # This matches Python's ChainBreakPerResidueSeqFeat behavior
+    return zeros(Float32, 1, L, B)
+end
+
+"""
+    ResidueTypeFeature()
+
+One-hot encoding of residue type. Returns shape [20, L, B].
+"""
+struct ResidueTypeFeature <: Feature
+    dim::Int
+end
+
+ResidueTypeFeature() = ResidueTypeFeature(20)
+
+function (f::ResidueTypeFeature)(batch::Dict, L::Int, B::Int)
+    if !haskey(batch, :residue_type)
+        return zeros(Float32, f.dim, L, B)
+    end
+
+    rtype = batch[:residue_type]  # [L, B], 1-indexed
+    mask = get(batch, :mask, ones(Float32, L, B))
+
+    # One-hot encode
+    onehot = zeros(Float32, f.dim, L, B)
+    for b in 1:B, l in 1:L
+        if mask[l, b] > 0.5
+            idx = clamp(Int(rtype[l, b]), 1, f.dim)
+            onehot[idx, l, b] = 1.0f0
+        end
+    end
+    return onehot
+end
+
+"""
+    Atom37CoordFeature(; relative::Bool=false)
+
+All-atom coordinates (37 atoms) + mask feature.
+If relative=true, coordinates are relative to CA.
+Returns shape [148, L, B] (37*3 coords + 37 mask).
+"""
+struct Atom37CoordFeature <: Feature
+    dim::Int
+    relative::Bool
+end
+
+Atom37CoordFeature(; relative::Bool=false) = Atom37CoordFeature(148, relative)
+
+function (f::Atom37CoordFeature)(batch::Dict, L::Int, B::Int)
+    if !haskey(batch, :coords_nm) && !haskey(batch, :coords)
+        return zeros(Float32, f.dim, L, B)
+    end
+
+    coords = get(batch, :coords_nm, get(batch, :coords, nothing))  # [3, 37, L, B]
+    coord_mask = get(batch, :coord_mask, ones(Float32, 37, L, B))  # [37, L, B]
+
+    # Apply mask to coordinates
+    coords = coords .* reshape(coord_mask, 1, 37, L, B)
+
+    if f.relative
+        # Make relative to CA (atom index 2)
+        ca_coords = coords[:, CA_INDEX, :, :]  # [3, L, B]
+        coords = coords .- reshape(ca_coords, 3, 1, L, B)
+        coords = coords .* reshape(coord_mask, 1, 37, L, B)
+    end
+
+    # Flatten coords: [3, 37, L, B] -> [111, L, B]
+    coords_flat = reshape(coords, 3*37, L, B)
+
+    # Concatenate with mask: [148, L, B]
+    return cat(coords_flat, Float32.(coord_mask); dims=1)
+end
+
+"""
+    BackboneTorsionFeature()
+
+Backbone torsion angles (phi, psi, omega) binned into 21 bins each.
+Returns shape [63, L, B] (3 angles * 21 bins).
+"""
+struct BackboneTorsionFeature <: Feature
+    dim::Int
+    n_bins::Int
+end
+
+BackboneTorsionFeature() = BackboneTorsionFeature(63, 21)
+
+function (f::BackboneTorsionFeature)(batch::Dict, L::Int, B::Int)
+    if !haskey(batch, :coords) && !haskey(batch, :coords_nm)
+        return zeros(Float32, f.dim, L, B)
+    end
+
+    coords = get(batch, :coords, get(batch, :coords_nm, nothing))  # [3, 37, L, B]
+    mask = get(batch, :mask, ones(Float32, L, B))  # [L, B]
+
+    # Get backbone torsion angles
+    angles = backbone_torsion_angles(coords, mask)  # [3, L, B]
+
+    # Bin angles into one-hot
+    # Create bin edges from -π to π with n_bins-1 edges
+    n_edges = f.n_bins - 1
+    edges = collect(range(Float32(-π), Float32(π), length=n_edges))
+
+    # One-hot encode each angle
+    result = zeros(Float32, f.dim, L, B)
+    for a in 1:3  # phi, psi, omega
+        for b in 1:B
+            for l in 1:L
+                angle = angles[a, l, b]
+                bin_idx = 1
+                for (j, edge) in enumerate(edges)
+                    if angle >= edge
+                        bin_idx = j + 1
+                    end
+                end
+                bin_idx = clamp(bin_idx, 1, f.n_bins)
+                result[(a-1)*f.n_bins + bin_idx, l, b] = 1.0f0
+            end
+        end
+    end
+    return result
+end
+
+"""
+    SidechainAngleFeature()
+
+Sidechain chi angles (4 angles) binned + mask.
+Returns shape [88, L, B] (4 angles * 21 bins + 4 mask).
+"""
+struct SidechainAngleFeature <: Feature
+    dim::Int
+    n_bins::Int
+end
+
+SidechainAngleFeature() = SidechainAngleFeature(88, 21)
+
+function (f::SidechainAngleFeature)(batch::Dict, L::Int, B::Int)
+    if !haskey(batch, :coords) && !haskey(batch, :coords_nm)
+        return zeros(Float32, f.dim, L, B)
+    end
+
+    coords = get(batch, :coords, get(batch, :coords_nm, nothing))  # [3, 37, L, B]
+    aatype = get(batch, :residue_type, ones(Int, L, B))  # [L, B]
+    mask = get(batch, :mask, ones(Float32, L, B))  # [L, B]
+    coord_mask = get(batch, :coord_mask, nothing)  # [37, L, B]
+
+    # Get sidechain torsion angles
+    chi_angles, chi_mask = sidechain_torsion_angles(coords, aatype, mask; coord_mask=coord_mask)  # [4, L, B], [4, L, B]
+
+    # Bin angles into one-hot (only first 4 chi angles)
+    n_edges = f.n_bins - 1
+    edges = collect(range(Float32(-π), Float32(π), length=n_edges))
+
+    # Output: 4 angles * 21 bins + 4 mask = 88
+    result = zeros(Float32, f.dim, L, B)
+    n_chi = 4
+
+    for a in 1:n_chi
+        for b in 1:B
+            for l in 1:L
+                if chi_mask[a, l, b]
+                    angle = chi_angles[a, l, b]
+                    bin_idx = 1
+                    for (j, edge) in enumerate(edges)
+                        if angle >= edge
+                            bin_idx = j + 1
+                        end
+                    end
+                    bin_idx = clamp(bin_idx, 1, f.n_bins)
+                    result[(a-1)*f.n_bins + bin_idx, l, b] = 1.0f0
+                end
+            end
+        end
+    end
+
+    # Add mask at the end
+    for a in 1:n_chi
+        for b in 1:B
+            for l in 1:L
+                result[n_chi*f.n_bins + a, l, b] = Float32(chi_mask[a, l, b])
+            end
+        end
+    end
+
+    return result
+end
+
+"""
+    ChainIdxSeqFeature()
+
+Chain index feature. Returns shape [1, L, B].
+"""
+struct ChainIdxSeqFeature <: Feature
+    dim::Int
+end
+
+ChainIdxSeqFeature() = ChainIdxSeqFeature(1)
+
+function (f::ChainIdxSeqFeature)(batch::Dict, L::Int, B::Int)
+    if haskey(batch, :chains)
+        chains = batch[:chains]  # [L, B]
+        return reshape(Float32.(chains), 1, L, B)
+    else
+        # Default: single chain (all zeros or ones)
+        return zeros(Float32, 1, L, B)
+    end
+end
+
+# ============================================================================
 # Pair Features
 # ============================================================================
 
@@ -452,6 +685,251 @@ function (f::CAPairDistFeature)(batch::Dict, L::Int, B::Int)
     end
     return zeros(Float32, f.dim, L, L, B)
 end
+
+# ============================================================================
+# Encoder Pair Features
+# ============================================================================
+
+"""
+    BackbonePairDistFeature()
+
+Pairwise distances between backbone atoms.
+Position (i, j) encodes distances from CA_i to {N_j, CA_j, C_j, CB_j}.
+Returns shape [84, L, L, B] (4 atoms * 21 bins).
+"""
+struct BackbonePairDistFeature <: Feature
+    dim::Int
+    n_bins::Int
+end
+
+BackbonePairDistFeature() = BackbonePairDistFeature(84, 21)
+
+function (f::BackbonePairDistFeature)(batch::Dict, L::Int, B::Int)
+    if !haskey(batch, :coords_nm) && !haskey(batch, :coords)
+        return zeros(Float32, f.dim, L, L, B)
+    end
+
+    coords = get(batch, :coords_nm, get(batch, :coords, nothing))  # [3, 37, L, B]
+    coord_mask = get(batch, :coord_mask, ones(Float32, 37, L, B))  # [37, L, B]
+
+    # Atom indices: N=1, CA=2, C=3, CB=4
+    N_IDX, CA_IDX, C_IDX, CB_IDX = 1, 2, 3, 4
+
+    # Extract backbone atoms
+    N = coords[:, N_IDX, :, :]    # [3, L, B]
+    CA = coords[:, CA_IDX, :, :]  # [3, L, B]
+    C = coords[:, C_IDX, :, :]    # [3, L, B]
+    CB = coords[:, CB_IDX, :, :]  # [3, L, B]
+
+    # Masks
+    ca_mask = coord_mask[CA_IDX, :, :]  # [L, B]
+    cb_mask = coord_mask[CB_IDX, :, :]  # [L, B]
+
+    # Compute pairwise distances CA_i to {N_j, CA_j, C_j, CB_j}
+    # CA_i: [3, L, 1, B]
+    # X_j:  [3, 1, L, B]
+    CA_i = reshape(CA, 3, L, 1, B)
+    N_j = reshape(N, 3, 1, L, B)
+    CA_j = reshape(CA, 3, 1, L, B)
+    C_j = reshape(C, 3, 1, L, B)
+    CB_j = reshape(CB, 3, 1, L, B)
+
+    # Compute distances
+    dist_CA_N = sqrt.(sum((CA_i .- N_j).^2, dims=1))   # [1, L, L, B]
+    dist_CA_CA = sqrt.(sum((CA_i .- CA_j).^2, dims=1))  # [1, L, L, B]
+    dist_CA_C = sqrt.(sum((CA_i .- C_j).^2, dims=1))    # [1, L, L, B]
+    dist_CA_CB = sqrt.(sum((CA_i .- CB_j).^2, dims=1))  # [1, L, L, B]
+
+    # Remove leading dimension
+    dist_CA_N = dropdims(dist_CA_N, dims=1)    # [L, L, B]
+    dist_CA_CA = dropdims(dist_CA_CA, dims=1)  # [L, L, B]
+    dist_CA_C = dropdims(dist_CA_C, dims=1)    # [L, L, B]
+    dist_CA_CB = dropdims(dist_CA_CB, dims=1)  # [L, L, B]
+
+    # Apply masks
+    pair_mask = reshape(ca_mask, L, 1, B) .* reshape(ca_mask, 1, L, B)  # [L, L, B]
+    cb_pair_mask = reshape(cb_mask, 1, L, B)  # [1, L, B] for CB atoms
+
+    dist_CA_N = dist_CA_N .* pair_mask
+    dist_CA_CA = dist_CA_CA .* pair_mask
+    dist_CA_C = dist_CA_C .* pair_mask
+    dist_CA_CB = dist_CA_CB .* pair_mask .* cb_pair_mask
+
+    # Bin distances (0.1 to 2.0 nm with n_bins-1 edges -> n_bins bins)
+    n_edges = f.n_bins - 1
+    edges = collect(range(0.1f0, 2.0f0, length=n_edges))
+
+    result = zeros(Float32, f.dim, L, L, B)
+
+    # Bin each distance type
+    for (d_idx, dist) in enumerate([dist_CA_N, dist_CA_CA, dist_CA_C, dist_CA_CB])
+        offset = (d_idx - 1) * f.n_bins
+        for b in 1:B, j in 1:L, i in 1:L
+            d = dist[i, j, b]
+            bin_idx = 1
+            for (k, edge) in enumerate(edges)
+                if d >= edge
+                    bin_idx = k + 1
+                end
+            end
+            bin_idx = clamp(bin_idx, 1, f.n_bins)
+            result[offset + bin_idx, i, j, b] = pair_mask[i, j, b]
+        end
+    end
+
+    return result
+end
+
+"""
+    ResidueOrientationFeature()
+
+Relative residue orientation features.
+Computes dihedral and bond angles between residue pairs.
+Returns shape [105, L, L, B] (5 angles * 21 bins).
+"""
+struct ResidueOrientationFeature <: Feature
+    dim::Int
+    n_bins::Int
+end
+
+ResidueOrientationFeature() = ResidueOrientationFeature(105, 21)
+
+function (f::ResidueOrientationFeature)(batch::Dict, L::Int, B::Int)
+    if !haskey(batch, :coords) && !haskey(batch, :coords_nm)
+        return zeros(Float32, f.dim, L, L, B)
+    end
+
+    coords = get(batch, :coords, get(batch, :coords_nm, nothing))  # [3, 37, L, B]
+    coord_mask = get(batch, :coord_mask, ones(Float32, 37, L, B))  # [37, L, B]
+
+    # Atom indices
+    N_IDX, CA_IDX, CB_IDX = 1, 2, 4
+
+    # Extract atoms
+    N = coords[:, N_IDX, :, :]    # [3, L, B]
+    CA = coords[:, CA_IDX, :, :]  # [3, L, B]
+    CB = coords[:, CB_IDX, :, :]  # [3, L, B]
+
+    # Masks
+    ca_mask = coord_mask[CA_IDX, :, :]  # [L, B]
+    cb_mask = coord_mask[CB_IDX, :, :]  # [L, B]
+
+    # Create pair mask (both residues need CA and CB)
+    pair_mask = reshape(ca_mask .* cb_mask, L, 1, B) .* reshape(ca_mask .* cb_mask, 1, L, B)  # [L, L, B]
+
+    result = zeros(Float32, f.dim, L, L, B)
+    n_edges = f.n_bins - 1
+    edges = collect(range(Float32(-π), Float32(π), length=n_edges))
+
+    # Compute angles for each pair
+    for b in 1:B
+        for j in 1:L
+            for i in 1:L
+                if pair_mask[i, j, b] < 0.5
+                    continue
+                end
+
+                # Get coordinates for residues i and j
+                N_i = N[:, i, b]
+                CA_i = CA[:, i, b]
+                CB_i = CB[:, i, b]
+                N_j = N[:, j, b]
+                CA_j = CA[:, j, b]
+                CB_j = CB[:, j, b]
+
+                # Compute 5 angles
+                # theta_12: dihedral N_i - CA_i - CB_i - CB_j
+                theta_12 = _scalar_dihedral(N_i, CA_i, CB_i, CB_j)
+                # theta_21: dihedral N_j - CA_j - CB_j - CB_i
+                theta_21 = _scalar_dihedral(N_j, CA_j, CB_j, CB_i)
+                # phi_12: bond angle CA_i - CB_i - CB_j
+                phi_12 = _scalar_bond_angle(CA_i, CB_i, CB_j)
+                # phi_21: bond angle CA_j - CB_j - CB_i
+                phi_21 = _scalar_bond_angle(CA_j, CB_j, CB_i)
+                # omega: dihedral CA_i - CB_i - CB_j - CA_j
+                omega = _scalar_dihedral(CA_i, CB_i, CB_j, CA_j)
+
+                angles = [theta_12, theta_21, phi_12, phi_21, omega]
+
+                # Bin each angle
+                for (a_idx, angle) in enumerate(angles)
+                    offset = (a_idx - 1) * f.n_bins
+                    bin_idx = 1
+                    for (k, edge) in enumerate(edges)
+                        if angle >= edge
+                            bin_idx = k + 1
+                        end
+                    end
+                    bin_idx = clamp(bin_idx, 1, f.n_bins)
+                    result[offset + bin_idx, i, j, b] = 1.0f0
+                end
+            end
+        end
+    end
+
+    return result
+end
+
+"""
+Helper for scalar bond angle computation.
+Matches Python's bond_angles(a, b, c) which computes angle at vertex a
+between vectors a→b and a→c.
+"""
+function _scalar_bond_angle(a::AbstractVector{T}, b::AbstractVector{T}, c::AbstractVector{T}) where T
+    # Python: b0 = b - a, b1 = c - a (vectors from a to b and a to c)
+    b0 = b .- a
+    b1 = c .- a
+
+    n0 = norm(b0)
+    n1 = norm(b1)
+
+    if n0 < T(1e-8) || n1 < T(1e-8)
+        return T(0)
+    end
+
+    b0 = b0 ./ n0
+    b1 = b1 ./ n1
+
+    cos_angle = dot(b0, b1)
+    cross_vec = cross(b0, b1)
+    sin_angle = norm(cross_vec)
+
+    return atan(sin_angle, cos_angle)
+end
+
+"""
+    ChainIdxPairFeature()
+
+Chain index pair feature. Returns shape [1, L, L, B].
+"""
+struct ChainIdxPairFeature <: Feature
+    dim::Int
+end
+
+ChainIdxPairFeature() = ChainIdxPairFeature(1)
+
+function (f::ChainIdxPairFeature)(batch::Dict, L::Int, B::Int)
+    if haskey(batch, :chains)
+        chains = batch[:chains]  # [L, B]
+        # Outer product: chain_i == chain_j
+        result = zeros(Float32, 1, L, L, B)
+        for b in 1:B
+            for j in 1:L
+                for i in 1:L
+                    result[1, i, j, b] = Float32(chains[i, b] == chains[j, b])
+                end
+            end
+        end
+        return result
+    else
+        # Default: all same chain
+        return ones(Float32, 1, L, L, B)
+    end
+end
+
+# ============================================================================
+# Standard Pair Features
+# ============================================================================
 
 """
     RelSeqSepFeature(; max_sep::Int=32)
@@ -722,14 +1200,93 @@ function score_network_pair_cond_features(cond_dim::Int; t_emb_dim::Int=256)
     return FeatureFactory(features, cond_dim; mode=:pair, use_ln=true)
 end
 
-# Legacy compatibility functions
+# Encoder feature factories matching Python nn_130m.yaml config
 
 """
     encoder_seq_features(token_dim::Int; latent_dim::Int=8)
 
 Create FeatureFactory for encoder sequence representation.
+Matches Python nn_130m.yaml encoder.feats_seq:
+  ["chain_break_per_res", "x1_aatype", "x1_a37coors_nm", "x1_a37coors_nm_rel",
+   "x1_bb_angles", "x1_sidechain_angles", "chain_idx_seq"]
+
+Feature dimensions:
+  - chain_break_per_res: 1
+  - x1_aatype: 20
+  - x1_a37coors_nm: 148 (37*3 + 37)
+  - x1_a37coors_nm_rel: 148 (37*3 + 37)
+  - x1_bb_angles: 63 (3*21)
+  - x1_sidechain_angles: 88 (4*21 + 4)
+  - chain_idx_seq: 1 (optional)
+  Total: 468 dims (or 469 with chain_idx) -> projects to token_dim
+
+Note: The pretrained AE1_ucond_512.ckpt uses 468 dims (no chain_idx).
+Set include_chain_idx=true to add chain_idx feature.
 """
-function encoder_seq_features(token_dim::Int; latent_dim::Int=8)
+function encoder_seq_features(token_dim::Int; latent_dim::Int=8, include_chain_idx::Bool=false)
+    features = Feature[
+        ChainBreakFeature(),                  # 1 dim
+        ResidueTypeFeature(),                 # 20 dims
+        Atom37CoordFeature(relative=false),   # 148 dims
+        Atom37CoordFeature(relative=true),    # 148 dims
+        BackboneTorsionFeature(),             # 63 dims
+        SidechainAngleFeature(),              # 88 dims
+    ]
+    if include_chain_idx
+        push!(features, ChainIdxSeqFeature())  # 1 dim
+    end
+    # Total: 468 dims (or 469 with chain_idx) -> projects to token_dim (768)
+    return FeatureFactory(features, token_dim; mode=:seq)
+end
+
+"""
+    encoder_cond_features(cond_dim::Int)
+
+Create FeatureFactory for encoder conditioning.
+Python encoder has empty feats_cond_seq, so we return zeros.
+"""
+function encoder_cond_features(cond_dim::Int)
+    # No features - just return zeros (ret_zero mode like Python)
+    return FeatureFactory(cond_dim; mode=:seq)
+end
+
+"""
+    encoder_pair_features(pair_dim::Int; seq_sep_dim::Int=127, include_chain_idx::Bool=false)
+
+Create FeatureFactory for encoder pair representation.
+Matches Python nn_130m.yaml encoder.feats_pair_repr:
+  ["rel_seq_sep", "x1_bb_pair_dists_nm", "x1_bb_pair_orientation", "chain_idx_pair"]
+
+Feature dimensions:
+  - rel_seq_sep: 127
+  - x1_bb_pair_dists_nm: 84 (4*21)
+  - x1_bb_pair_orientation: 105 (5*21)
+  - chain_idx_pair: 1 (optional)
+  Total: 316 dims (or 317 with chain_idx) -> projects to pair_dim
+
+Note: The pretrained AE1_ucond_512.ckpt uses 316 dims (no chain_idx).
+Set include_chain_idx=true to add chain_idx feature.
+"""
+function encoder_pair_features(pair_dim::Int; seq_sep_dim::Int=127, include_chain_idx::Bool=false)
+    features = Feature[
+        RelSeqSepFeature(; seq_sep_dim=seq_sep_dim),  # 127 dims
+        BackbonePairDistFeature(),                     # 84 dims
+        ResidueOrientationFeature(),                   # 105 dims
+    ]
+    if include_chain_idx
+        push!(features, ChainIdxPairFeature())         # 1 dim
+    end
+    # Total: 316 dims (or 317 with chain_idx) -> projects to pair_dim (256)
+    return FeatureFactory(features, pair_dim; mode=:pair)
+end
+
+# Legacy versions for backwards compatibility
+"""
+    encoder_seq_features_legacy(token_dim::Int; latent_dim::Int=8)
+
+Legacy encoder sequence features (simpler set for testing).
+"""
+function encoder_seq_features_legacy(token_dim::Int; latent_dim::Int=8)
     features = Feature[
         CACoordFeature(),
         PositionFeature(64),
@@ -738,23 +1295,11 @@ function encoder_seq_features(token_dim::Int; latent_dim::Int=8)
 end
 
 """
-    encoder_cond_features(cond_dim::Int)
+    encoder_pair_features_legacy(pair_dim::Int)
 
-Create FeatureFactory for encoder conditioning.
+Legacy encoder pair features (simpler set for testing).
 """
-function encoder_cond_features(cond_dim::Int)
-    features = Feature[
-        ZeroFeature(64),  # Placeholder - can add more conditioning
-    ]
-    return FeatureFactory(features, cond_dim; mode=:seq)
-end
-
-"""
-    encoder_pair_features(pair_dim::Int)
-
-Create FeatureFactory for encoder pair representation.
-"""
-function encoder_pair_features(pair_dim::Int)
+function encoder_pair_features_legacy(pair_dim::Int)
     features = Feature[
         DistanceBinFeature(64),
         RelSeqSepFeature(32),

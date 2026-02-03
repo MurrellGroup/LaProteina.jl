@@ -26,6 +26,7 @@ include("utils.jl")
 # Feature extraction
 include("features/time_embedding.jl")
 include("features/pair_features.jl")
+include("features/geometry.jl")
 include("features/feature_factory.jl")
 
 # Neural network layers
@@ -34,6 +35,7 @@ include("nn/pair_bias_attention.jl")
 include("nn/transition.jl")
 include("nn/transformer_block.jl")
 include("nn/score_network.jl")
+include("nn/encoder.jl")
 include("nn/decoder.jl")
 
 # Data loading
@@ -74,18 +76,31 @@ export
     bin_pairwise_distances, relative_sequence_separation,
     pairwise_distances, bin_values,
 
+    # Geometry utilities
+    normalize_last_dim, signed_dihedral_angle, bond_angle,
+    backbone_torsion_angles, sidechain_torsion_angles,
+    bin_angles, MAX_CHI_ANGLES, CHI_ATOM_INDICES,
+
     # Feature factory
-    Feature, FeatureFactory,
+    Feature, FeatureFactory, get_dim,
     ZeroFeature, TimeFeature, TimePairFeature, PositionFeature,
     XtBBCAFeature, XtLocalLatentsFeature,
     XscBBCAFeature, XscLocalLatentsFeature,
     OptionalCACoorsFeature, OptionalResTypeFeature, CroppedFlagFeature,
     LatentFeature, CACoordFeature,
+    # Encoder sequence features
+    ChainBreakFeature, ResidueTypeFeature, Atom37CoordFeature,
+    BackboneTorsionFeature, SidechainAngleFeature, ChainIdxSeqFeature,
+    # Pair features
     DistanceBinFeature, XtBBCAPairDistFeature, XscBBCAPairDistFeature,
     OptionalCAPairDistFeature, CAPairDistFeature, RelSeqSepFeature,
+    # Encoder pair features
+    BackbonePairDistFeature, ResidueOrientationFeature, ChainIdxPairFeature,
+    # Feature factory constructors
     score_network_seq_features, score_network_cond_features,
     score_network_pair_features, score_network_pair_cond_features,
     encoder_seq_features, encoder_cond_features, encoder_pair_features,
+    encoder_seq_features_legacy, encoder_pair_features_legacy,
     decoder_seq_features, decoder_pair_features, decoder_cond_features,
 
     # Layers
@@ -99,6 +114,9 @@ export
     score_network_forward,
     v_to_x1, x1_to_v,
     self_condition_input,
+
+    # Encoder
+    EncoderTransformer, encode,
 
     # Decoder
     DecoderTransformer, decode,
@@ -125,6 +143,6 @@ export
     load_pdb, extract_ca_coords, batch_pdb_data, save_pdb,
 
     # Weight loading
-    load_score_network_weights!, load_decoder_weights!
+    load_score_network_weights!, load_decoder_weights!, load_encoder_weights!
 
 end # module

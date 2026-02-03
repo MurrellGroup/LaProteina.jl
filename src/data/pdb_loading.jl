@@ -1,7 +1,9 @@
 # PDB file loading utilities
 # Uses BioStructures.jl for parsing
 
-using BioStructures
+import BioStructures: read, PDBFormat, collectresidues, standardselector,
+                      collectatoms, resname, atomname
+import BioStructures: coords as bio_coords
 
 """
     load_pdb(filepath::String; chain_id::String="A")
@@ -21,7 +23,7 @@ Dict with:
 - :sequence => amino acid sequence string
 """
 function load_pdb(filepath::String; chain_id::String="A")
-    struc = read(filepath, PDB)
+    struc = read(filepath, PDBFormat)
 
     # Get chain
     chain = struc[chain_id]
@@ -37,7 +39,7 @@ function load_pdb(filepath::String; chain_id::String="A")
 
     for (i, res) in enumerate(residues)
         # Get residue name and convert to index
-        res_name = BioStructures.resname(res)
+        res_name = resname(res)
         aa_char = get(RESTYPE_3TO1, res_name, 'X')
         aatype[i] = aa_to_index(aa_char)
         sequence[i] = aa_char
@@ -49,7 +51,7 @@ function load_pdb(filepath::String; chain_id::String="A")
             # Check if atom is in our atom37 representation
             if haskey(ATOM_ORDER, atom_nm)
                 atom_idx = ATOM_ORDER[atom_nm]
-                coord = BioStructures.coords(atom)  # Returns 3-element vector in Angstroms
+                coord = bio_coords(atom)  # Returns 3-element vector in Angstroms
 
                 # Convert to nanometers
                 coords[:, atom_idx, i] = Float32.(coord) ./ 10.0f0
@@ -93,7 +95,7 @@ Batch multiple PDB data dictionaries, padding to uniform length.
 # Returns
 Dict with batched arrays (dimension order: [feature_dims..., L, B])
 """
-function batch_pdb_data(data_list::Vector{Dict}; pad_length::Union{Int,Nothing}=nothing)
+function batch_pdb_data(data_list::Vector{<:Dict}; pad_length::Union{Int,Nothing}=nothing)
     B = length(data_list)
 
     # Determine padding length
