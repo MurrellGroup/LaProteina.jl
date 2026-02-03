@@ -11,6 +11,7 @@ using Distributions
 using Printf
 using CUDA
 using cuDNN
+using JLD2
 
 # Re-export Flowfusion types for convenience
 using Flowfusion
@@ -51,6 +52,9 @@ include("flowfusion_sampling.jl")
 
 # Weight loading
 include("weights.jl")
+
+# Training utilities
+include("training/precompute_encoder.jl")
 
 # Exports
 export
@@ -157,6 +161,11 @@ export
     load_pdb, extract_ca_coords, batch_pdb_data, save_pdb,
 
     # Weight loading
-    load_score_network_weights!, load_decoder_weights!, load_encoder_weights!
+    load_score_network_weights!, load_decoder_weights!, load_encoder_weights!,
+
+    # Training utilities - precomputed encoder
+    PrecomputedProtein, precompute_single_protein,
+    precompute_dataset_sharded, precompute_dataset_single,
+    load_precomputed_shard, batch_from_precomputed
 
 end # module

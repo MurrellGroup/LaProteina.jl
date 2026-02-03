@@ -416,19 +416,24 @@ function flow_matching_batch_from_precomputed(precomputed::Vector{PrecomputedSam
 end
 
 """
-    efficient_flow_loss_gpu(model, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
+    efficient_flow_loss_gpu(model, xt_ca, xt_ll, x1_ca, x1_ll, t_ca, t_ll, t_model, mask)
 
 Compute flow matching loss entirely on GPU using efficient forward.
 
 # Arguments
+- xt_ca, xt_ll: interpolated states (at different positions due to schedules)
+- x1_ca, x1_ll: target clean states
+- t_ca, t_ll: actual interpolation times for each component (for loss computation)
+- t_model: single time value passed to the model (the "progress" u)
+- mask: residue mask
 All tensors should be on GPU.
 """
-function efficient_flow_loss_gpu(model, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
+function efficient_flow_loss_gpu(model, xt_ca, xt_ll, x1_ca, x1_ll, t_ca, t_ll, t_model, mask)
     L, B = size(mask)
     latent_dim = size(xt_ll, 1)
 
-    # Create efficient batch
-    eff_batch = EfficientScoreNetworkBatch(xt_ca, xt_ll, t_vec, t_vec, mask)
+    # Create efficient batch - model sees single time value for both components
+    eff_batch = EfficientScoreNetworkBatch(xt_ca, xt_ll, t_model, t_model, mask)
 
     # Forward pass with efficient method
     output = forward_efficient(model, eff_batch)
@@ -436,9 +441,11 @@ function efficient_flow_loss_gpu(model, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
     v_ll = output[:local_latents][:v]
 
     # v-prediction: x1_pred = xt + (1-t) * v
-    t_bc = reshape(t_vec, 1, 1, B)
-    x1_pred_ca = xt_ca .+ (1f0 .- t_bc) .* v_ca
-    x1_pred_ll = xt_ll .+ (1f0 .- t_bc) .* v_ll
+    # Use the ACTUAL interpolation times for loss computation
+    t_ca_bc = reshape(t_ca, 1, 1, B)
+    t_ll_bc = reshape(t_ll, 1, 1, B)
+    x1_pred_ca = xt_ca .+ (1f0 .- t_ca_bc) .* v_ca
+    x1_pred_ll = xt_ll .+ (1f0 .- t_ll_bc) .* v_ll
 
     # Squared error
     err_ca = (x1_pred_ca .- x1_ca).^2
@@ -452,11 +459,14 @@ function efficient_flow_loss_gpu(model, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
     loss_ll_per_sample = sum(err_ll .* mask_3d, dims=(1,2)) ./ (nres .* Float32(latent_dim))
 
     # Time weighting: 1 / ((1-t)^2 + eps)
-    eps = 1f-5
-    t_weight = 1f0 ./ ((1f0 .- t_bc).^2 .+ eps)
+    # Using eps=0.1 for stability (caps max weight at 10)
+    # Use respective t for each component's weighting
+    eps = 0.1f0
+    t_weight_ca = 1f0 ./ ((1f0 .- t_ca_bc).^2 .+ eps)
+    t_weight_ll = 1f0 ./ ((1f0 .- t_ll_bc).^2 .+ eps)
 
-    loss_ca = mean(loss_ca_per_sample .* t_weight)
-    loss_ll = mean(loss_ll_per_sample .* t_weight)
+    loss_ca = mean(loss_ca_per_sample .* t_weight_ca)
+    loss_ll = mean(loss_ll_per_sample .* t_weight_ll)
 
     return loss_ca + loss_ll
 end
