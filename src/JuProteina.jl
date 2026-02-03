@@ -35,6 +35,7 @@ include("nn/pair_bias_attention.jl")
 include("nn/transition.jl")
 include("nn/transformer_block.jl")
 include("nn/score_network.jl")
+include("nn/score_network_efficient.jl")
 include("nn/encoder.jl")
 include("nn/decoder.jl")
 
@@ -117,6 +118,9 @@ export
     # Separated feature extraction for training
     ScoreNetworkFeatures, extract_features, forward_from_features,
     ScoreNetworkRawFeatures, extract_raw_features, forward_from_raw_features,
+    # Efficient GPU-native forward pass
+    EfficientScoreNetworkBatch, forward_efficient, to_efficient_batch,
+    compute_time_embedding_gpu, compute_pairwise_distances_gpu,
 
     # Encoder
     EncoderTransformer, encode,

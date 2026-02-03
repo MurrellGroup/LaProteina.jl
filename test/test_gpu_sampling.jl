@@ -24,7 +24,7 @@ end
 weights_dir = "/home/claudey/JuProteina/JuProteina/weights"
 score_net_path = joinpath(weights_dir, "score_network.npz")
 decoder_path = joinpath(weights_dir, "decoder.npz")
-output_dir = "/home/claudey/JuProteina/JuProteina/test/samples_gpu"
+output_dir = "/home/claudey/JuProteina/JuProteina/test/samples_gpu_110"
 mkpath(output_dir)
 
 println("\n=== Loading Models ===")
@@ -47,7 +47,7 @@ score_net_dev = score_net |> dev
 println("Score network moved to GPU, decoder on CPU")
 
 # Test parameters
-L = 100
+L = 110
 B = 3
 nsteps = 400
 
