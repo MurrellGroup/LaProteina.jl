@@ -114,6 +114,9 @@ export
     score_network_forward,
     v_to_x1, x1_to_v,
     self_condition_input,
+    # Separated feature extraction for training
+    ScoreNetworkFeatures, extract_features, forward_from_features,
+    ScoreNetworkRawFeatures, extract_raw_features, forward_from_raw_features,
 
     # Encoder
     EncoderTransformer, encode,

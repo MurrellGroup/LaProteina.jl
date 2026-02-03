@@ -276,6 +276,251 @@ function score_network_forward(model::ScoreNetwork, x_t, t; mask=nothing, x_sc=n
 end
 
 # ============================================================================
+# Separated feature extraction and forward pass for training
+# ============================================================================
+
+"""
+    ScoreNetworkFeatures
+
+Container for pre-extracted features from ScoreNetwork.
+Used to separate non-differentiable feature extraction from differentiable forward pass.
+"""
+struct ScoreNetworkFeatures{T}
+    seq_features::Array{T, 3}      # [token_dim, L, B] - sequence features (projected)
+    cond_features::Array{T, 3}     # [dim_cond, L, B] - conditioning features (projected)
+    pair_features::Array{T, 4}     # [pair_dim, L, L, B] - pair features (projected)
+    pair_cond::Array{T, 4}         # [dim_cond, L, L, B] - pair conditioning (projected)
+    mask::Array{T, 2}              # [L, B]
+end
+
+"""
+    ScoreNetworkRawFeatures
+
+Container for raw (unprojected) features from ScoreNetwork.
+Used for GPU training where projection happens on GPU inside the gradient context.
+Works with both CPU Arrays and GPU CuArrays.
+"""
+struct ScoreNetworkRawFeatures{A3, A4, A2}
+    seq_raw::A3        # [raw_seq_dim, L, B]
+    cond_raw::A3       # [raw_cond_dim, L, B]
+    pair_raw::A4       # [raw_pair_dim, L, L, B]
+    pair_cond_raw::A4  # [raw_pair_cond_dim, L, L, B]
+    mask::A2           # [L, B]
+end
+
+"""
+    extract_raw_features(model::ScoreNetwork, batch::Dict)
+
+Extract raw features (before projection) from batch. This includes all feature
+computation which may involve non-differentiable operations (scalar indexing, etc.).
+
+Call this OUTSIDE the gradient context, then pass to `forward_from_raw_features`.
+
+# Returns
+ScoreNetworkRawFeatures containing unprojected features for GPU projection.
+"""
+function extract_raw_features(model::ScoreNetwork, batch::Dict)
+    mask = get(batch, :mask, nothing)
+    x_t = batch[:x_t]
+    bb_ca = x_t[:bb_ca]
+    L, B = size(bb_ca, 2), size(bb_ca, 3)
+
+    if isnothing(mask)
+        mask = ones(Float32, L, B)
+    end
+
+    batch_with_mask = copy(batch)
+    batch_with_mask[:mask] = mask
+
+    # Extract raw features (before projection)
+    seq_raw = cat([f(batch_with_mask, L, B) for f in model.init_repr_factory.features]...; dims=1)
+    cond_raw = cat([f(batch_with_mask, L, B) for f in model.cond_factory.features]...; dims=1)
+    pair_raw = cat([f(batch_with_mask, L, B) for f in model.pair_rep_builder.init_repr_factory.features]...; dims=1)
+
+    # Pair conditioning raw features
+    if !isnothing(model.pair_rep_builder.cond_factory)
+        pair_cond_raw = cat([f(batch_with_mask, L, B) for f in model.pair_rep_builder.cond_factory.features]...; dims=1)
+    else
+        pair_cond_raw = zeros(Float32, 0, L, L, B)
+    end
+
+    return ScoreNetworkRawFeatures(seq_raw, cond_raw, pair_raw, pair_cond_raw, Float32.(mask))
+end
+
+"""
+    forward_from_raw_features(model::ScoreNetwork, raw_features::ScoreNetworkRawFeatures)
+
+Run full forward pass from raw (unprojected) features.
+This projects features and runs the transformer - fully differentiable.
+Call this INSIDE the gradient context.
+
+# Returns
+Dict with :bb_ca and :local_latents outputs (same format as full model).
+"""
+function forward_from_raw_features(model::ScoreNetwork, raw_features::ScoreNetworkRawFeatures)
+    mask = raw_features.mask
+    L, B = size(mask)
+    mask_exp = reshape(mask, 1, L, B)
+    pair_mask = reshape(mask, L, 1, B) .* reshape(mask, 1, L, B)  # [L, L, B]
+    pair_mask_exp = reshape(pair_mask, 1, L, L, B)  # [1, L, L, B]
+
+    # Project features, apply optional LayerNorm, and masks (matching FeatureFactory behavior)
+    # Cond features
+    cond = model.cond_factory.projection(raw_features.cond_raw)
+    if model.cond_factory.use_ln && !isnothing(model.cond_factory.ln)
+        cond = model.cond_factory.ln(cond)
+    end
+    cond = cond .* mask_exp
+
+    # Seq features
+    seqs = model.init_repr_factory.projection(raw_features.seq_raw)
+    if model.init_repr_factory.use_ln && !isnothing(model.init_repr_factory.ln)
+        seqs = model.init_repr_factory.ln(seqs)
+    end
+    seqs = seqs .* mask_exp
+
+    # Pair features
+    pair_rep = model.pair_rep_builder.init_repr_factory.projection(raw_features.pair_raw)
+    if model.pair_rep_builder.init_repr_factory.use_ln && !isnothing(model.pair_rep_builder.init_repr_factory.ln)
+        pair_rep = model.pair_rep_builder.init_repr_factory.ln(pair_rep)
+    end
+    pair_rep = pair_rep .* pair_mask_exp
+
+    # Apply conditioning transitions (no residual, matches full model forward)
+    cond = model.transition_c_1(cond, mask)
+    cond = model.transition_c_2(cond, mask)
+
+    # Apply pair AdaLN conditioning if present
+    if !isnothing(model.pair_rep_builder.adaln) && !isnothing(model.pair_rep_builder.cond_factory)
+        pair_cond = model.pair_rep_builder.cond_factory.projection(raw_features.pair_cond_raw)
+        if model.pair_rep_builder.cond_factory.use_ln && !isnothing(model.pair_rep_builder.cond_factory.ln)
+            pair_cond = model.pair_rep_builder.cond_factory.ln(pair_cond)
+        end
+        pair_cond = pair_cond .* pair_mask_exp
+        pair_rep = model.pair_rep_builder.adaln(pair_rep, pair_cond, pair_mask)
+    end
+
+    # Run transformer layers
+    for i in 1:model.n_layers
+        seqs = model.transformer_layers[i](seqs, pair_rep, cond, mask)
+
+        # Optional pair update
+        if model.update_pair_repr && i < model.n_layers
+            if !isnothing(model.pair_update_layers[i])
+                pair_rep = model.pair_update_layers[i](seqs, pair_rep, mask)
+            end
+        end
+    end
+
+    # Project to outputs
+    local_latents_out = model.local_latents_proj(seqs) .* mask_exp
+    ca_out = model.ca_proj(seqs) .* mask_exp
+
+    # Return in same format as full model
+    out_key = model.output_param
+    return Dict(
+        :bb_ca => Dict(out_key => ca_out),
+        :local_latents => Dict(out_key => local_latents_out)
+    )
+end
+
+"""
+    extract_features(model::ScoreNetwork, batch::Dict)
+
+Extract and project features from batch. This includes all feature computation
+which may involve non-differentiable operations (scalar indexing, etc.).
+
+Call this OUTSIDE the gradient context, then pass features to `forward_from_features`.
+
+# Returns
+ScoreNetworkFeatures containing projected seq, cond, and pair representations.
+"""
+function extract_features(model::ScoreNetwork, batch::Dict)
+    mask = get(batch, :mask, nothing)
+    x_t = batch[:x_t]
+    bb_ca = x_t[:bb_ca]
+    L, B = size(bb_ca, 2), size(bb_ca, 3)
+
+    if isnothing(mask)
+        mask = ones(Float32, L, B)
+    end
+
+    batch_with_mask = copy(batch)
+    batch_with_mask[:mask] = mask
+
+    # Extract and project sequence features
+    seq_features = model.init_repr_factory(batch_with_mask)  # [token_dim, L, B]
+
+    # Extract and project conditioning features
+    cond_features = model.cond_factory(batch_with_mask)  # [dim_cond, L, B]
+
+    # Extract and project pair features
+    pair_features = model.pair_rep_builder.init_repr_factory(batch_with_mask)  # [pair_dim, L, L, B]
+
+    # Extract and project pair conditioning (if present)
+    if !isnothing(model.pair_rep_builder.cond_factory)
+        pair_cond = model.pair_rep_builder.cond_factory(batch_with_mask)  # [dim_cond, L, L, B]
+    else
+        pair_cond = zeros(Float32, 0, L, L, B)
+    end
+
+    return ScoreNetworkFeatures(seq_features, cond_features, pair_features, pair_cond, Float32.(mask))
+end
+
+"""
+    forward_from_features(model::ScoreNetwork, features::ScoreNetworkFeatures)
+
+Run the trainable forward pass from pre-extracted features.
+This is fully differentiable and should be called INSIDE the gradient context.
+
+# Returns
+Dict with :bb_ca and :local_latents outputs (same format as full model).
+"""
+function forward_from_features(model::ScoreNetwork, features::ScoreNetworkFeatures)
+    mask = features.mask
+    L, B = size(mask)
+    mask_exp = reshape(mask, 1, L, B)
+
+    # Apply conditioning transitions (no residual, matches full model forward)
+    cond = features.cond_features
+    cond = model.transition_c_1(cond, mask)
+    cond = model.transition_c_2(cond, mask)
+
+    # Apply mask to sequence features
+    seqs = features.seq_features .* mask_exp
+
+    # Apply pair AdaLN conditioning if present
+    pair_rep = features.pair_features
+    if !isnothing(model.pair_rep_builder.adaln) && size(features.pair_cond, 1) > 0
+        pair_mask = reshape(mask, L, 1, B) .* reshape(mask, 1, L, B)
+        pair_rep = model.pair_rep_builder.adaln(pair_rep, features.pair_cond, pair_mask)
+    end
+
+    # Run transformer layers
+    for i in 1:model.n_layers
+        seqs = model.transformer_layers[i](seqs, pair_rep, cond, mask)
+
+        # Optional pair update
+        if model.update_pair_repr && i < model.n_layers
+            if !isnothing(model.pair_update_layers[i])
+                pair_rep = model.pair_update_layers[i](seqs, pair_rep, mask)
+            end
+        end
+    end
+
+    # Project to outputs
+    local_latents_out = model.local_latents_proj(seqs) .* mask_exp
+    ca_out = model.ca_proj(seqs) .* mask_exp
+
+    # Return in same format as full model
+    out_key = model.output_param
+    return Dict(
+        :bb_ca => Dict(out_key => ca_out),
+        :local_latents => Dict(out_key => local_latents_out)
+    )
+end
+
+# ============================================================================
 # Utility functions for flow matching
 # ============================================================================
 

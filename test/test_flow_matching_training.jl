@@ -1,13 +1,13 @@
 # Flow matching training using pretrained frozen VAE
 # Features computed on CPU, model forward on GPU
 # Loss matches Python la-proteina: MSE / nres * (1 / ((1-t)^2 + eps))
+# Uses clean extract_raw_features + forward_from_raw_features API
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
 using JuProteina
 using Flux
-using Functors
 using CUDA
 using Statistics
 using Random
@@ -30,11 +30,9 @@ if CUDA.functional()
     println("Device: ", CUDA.device())
     println("Memory: ", round(CUDA.available_memory() / 1e9, digits=2), " GB available")
     use_gpu = true
-    dev = gpu
 else
     println("CUDA not functional, running on CPU")
     use_gpu = false
-    dev = identity
 end
 
 # Load AFDB samples
@@ -72,7 +70,7 @@ encoder = EncoderTransformer(
 load_encoder_weights!(encoder, joinpath(@__DIR__, "..", "weights", "encoder.npz"))
 println("Encoder loaded (CPU, frozen)")
 
-# Create ScoreNetwork (stays on CPU, we'll extract trainable parts)
+# Create ScoreNetwork - keep CPU copy for feature extraction, GPU copy for training
 println("\n=== Creating ScoreNetwork ===")
 latent_dim = 8
 score_net_cpu = ScoreNetwork(
@@ -87,47 +85,18 @@ score_net_cpu = ScoreNetwork(
     update_pair_repr=false
 )
 load_score_network_weights!(score_net_cpu, joinpath(@__DIR__, "..", "weights", "score_network.npz"))
+println("ScoreNetwork loaded (CPU copy for feature extraction)")
 
-# Create trainable GPU model (only projections and transformers)
-struct GPUScoreNetworkModel
-    cond_proj::Any
-    seq_proj::Any
-    pair_proj::Any
-    transition_c_1::Any
-    transition_c_2::Any
-    transformer_layers::Vector
-    local_latents_proj::Any
-    ca_proj::Any
-end
-
-Functors.@functor GPUScoreNetworkModel (cond_proj, seq_proj, pair_proj, transition_c_1, transition_c_2, transformer_layers, local_latents_proj, ca_proj,)
-
-println("Setting up GPU model...")
+# Create GPU model for training
 if use_gpu
-    gpu_model = GPUScoreNetworkModel(
-        score_net_cpu.cond_factory.projection |> gpu,
-        score_net_cpu.init_repr_factory.projection |> gpu,
-        score_net_cpu.pair_rep_builder.init_repr_factory.projection |> gpu,
-        score_net_cpu.transition_c_1 |> gpu,
-        score_net_cpu.transition_c_2 |> gpu,
-        [layer |> gpu for layer in score_net_cpu.transformer_layers],
-        score_net_cpu.local_latents_proj |> gpu,
-        score_net_cpu.ca_proj |> gpu,
-    )
+    score_net = score_net_cpu |> gpu
+    println("ScoreNetwork moved to GPU for training")
 else
-    gpu_model = GPUScoreNetworkModel(
-        score_net_cpu.cond_factory.projection,
-        score_net_cpu.init_repr_factory.projection,
-        score_net_cpu.pair_rep_builder.init_repr_factory.projection,
-        score_net_cpu.transition_c_1,
-        score_net_cpu.transition_c_2,
-        score_net_cpu.transformer_layers,
-        score_net_cpu.local_latents_proj,
-        score_net_cpu.ca_proj,
-    )
+    score_net = score_net_cpu
+    println("ScoreNetwork on CPU")
 end
 
-n_params = sum(length, Flux.trainables(gpu_model))
+n_params = sum(length, Flux.trainables(score_net))
 println("Trainable parameters: ", n_params)
 
 # RDNFlow processes
@@ -137,39 +106,7 @@ P_ll = RDNFlow(latent_dim; zero_com=false, sde_gt_mode=:tan, sde_gt_param=1.0f0)
 P = (P_ca, P_ll)
 
 # Optimizer
-opt_state = Optimisers.setup(Adam(1e-5), gpu_model)
-
-# Compute raw features on CPU (outside gradient)
-function compute_raw_features(score_net_cpu, xt_ca, xt_ll, t_vec, mask)
-    L, B = size(mask)
-    batch = Dict{Symbol, Any}(
-        :x_t => Dict(:bb_ca => xt_ca, :local_latents => xt_ll),
-        :t => Dict(:bb_ca => t_vec, :local_latents => t_vec),
-        :mask => mask
-    )
-    cond_raw = cat([f(batch, L, B) for f in score_net_cpu.cond_factory.features]...; dims=1)
-    seq_raw = cat([f(batch, L, B) for f in score_net_cpu.init_repr_factory.features]...; dims=1)
-    pair_raw = cat([f(batch, L, B) for f in score_net_cpu.pair_rep_builder.init_repr_factory.features]...; dims=1)
-    return cond_raw, seq_raw, pair_raw
-end
-
-# GPU forward pass (differentiable)
-function forward_gpu(model::GPUScoreNetworkModel, cond_raw, seq_raw, pair_raw, mask)
-    L, B = size(mask)
-    cond = model.cond_proj(cond_raw)
-    cond = cond .+ model.transition_c_1(cond, mask)
-    cond = cond .+ model.transition_c_2(cond, mask)
-    seqs = model.seq_proj(seq_raw)
-    mask_exp = reshape(mask, 1, L, B)
-    seqs = seqs .* mask_exp
-    pair_rep = model.pair_proj(pair_raw)
-    for layer in model.transformer_layers
-        seqs = layer(seqs, pair_rep, cond, mask)
-    end
-    local_latents_out = model.local_latents_proj(seqs) .* mask_exp
-    ca_out = model.ca_proj(seqs) .* mask_exp
-    return ca_out, local_latents_out
-end
+opt_state = Optimisers.setup(Adam(1e-5), score_net)
 
 # Get X1 from frozen encoder (called OUTSIDE gradient)
 function get_x1_from_encoder(encoder, data_batch)
@@ -231,8 +168,11 @@ end
 
 # Flow matching loss matching Python la-proteina:
 # loss = sum((x_1 - x_1_pred)^2) / nres * (1 / ((1-t)^2 + eps))
-function compute_loss(model, cond_raw, seq_raw, pair_raw, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
-    v_ca, v_ll = forward_gpu(model, cond_raw, seq_raw, pair_raw, mask)
+function compute_loss(model, raw_features, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
+    # Forward pass: project raw features and run transformer (differentiable)
+    output = forward_from_raw_features(model, raw_features)
+    v_ca = output[:bb_ca][:v]
+    v_ll = output[:local_latents][:v]
 
     L, B = size(mask)
     t_bc = reshape(t_vec, 1, 1, B)
@@ -265,6 +205,17 @@ function compute_loss(model, cond_raw, seq_raw, pair_raw, xt_ca, xt_ll, x1_ca, x
     return loss_ca + loss_ll
 end
 
+# Helper to convert ScoreNetworkRawFeatures to GPU
+function raw_features_to_gpu(features::ScoreNetworkRawFeatures)
+    return ScoreNetworkRawFeatures(
+        gpu(features.seq_raw),
+        gpu(features.cond_raw),
+        gpu(features.pair_raw),
+        gpu(features.pair_cond_raw),
+        gpu(features.mask)
+    )
+end
+
 # Training loop with proper logging
 println("\n=== Training ===")
 n_epochs = 10
@@ -291,16 +242,19 @@ for epoch in 1:n_epochs
             # Prepare batch (encoder runs here on CPU, OUTSIDE gradient)
             batch = prepare_training_batch(batch_data, encoder, P)
 
-            # Compute features on CPU (outside gradient)
-            cond_raw, seq_raw, pair_raw = compute_raw_features(
-                score_net_cpu, batch.xt_ca, batch.xt_ll, batch.t, batch.mask
+            # Create score network batch format
+            score_batch = Dict{Symbol, Any}(
+                :x_t => Dict(:bb_ca => batch.xt_ca, :local_latents => batch.xt_ll),
+                :t => Dict(:bb_ca => batch.t, :local_latents => batch.t),
+                :mask => batch.mask
             )
 
-            # Move to GPU
+            # Extract raw features on CPU (outside gradient, uses CPU model)
+            raw_features = extract_raw_features(score_net_cpu, score_batch)
+
+            # Move features and batch data to GPU
             if use_gpu
-                cond_raw = gpu(cond_raw)
-                seq_raw = gpu(seq_raw)
-                pair_raw = gpu(pair_raw)
+                raw_features = raw_features_to_gpu(raw_features)
                 xt_ca = gpu(batch.xt_ca)
                 xt_ll = gpu(batch.xt_ll)
                 x1_ca = gpu(batch.x1_ca)
@@ -313,13 +267,13 @@ for epoch in 1:n_epochs
                 t_vec, mask = batch.t, batch.mask
             end
 
-            # Compute loss and gradients (only gpu_model is differentiated)
-            loss_val, grads = Flux.withgradient(gpu_model) do m
-                compute_loss(m, cond_raw, seq_raw, pair_raw, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
+            # Compute loss and gradients (score_net is differentiated)
+            loss_val, grads = Flux.withgradient(score_net) do m
+                compute_loss(m, raw_features, xt_ca, xt_ll, x1_ca, x1_ll, t_vec, mask)
             end
 
             # Update
-            Optimisers.update!(opt_state, gpu_model, grads[1])
+            Optimisers.update!(opt_state, score_net, grads[1])
 
             push!(all_losses, Float32(cpu(loss_val)))
 
