@@ -11,7 +11,12 @@ Manifest.toml
 # Generated files
 generated_structures/
 test/samples/
+test/samples_*/
+test/afdb_vae_comparison/
 test/*.npy
+
+# Logs
+*.log
 
 # IDE
 .vscode/
