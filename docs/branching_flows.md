@@ -219,10 +219,17 @@ N_SAMPLES=1 N_STEPS=100 julia scripts/sample_branching.jl
 # - N_STEPS: Number of integration steps
 ```
 
+The script:
+1. Generates CA coords + latents using branching flows
+2. Runs the decoder to get all-atom coordinates
+3. Saves PDB file with full atomic detail
+4. Saves JLD2 with all data for further analysis
+
 Example output (5k batch trained model):
-- Initial length: 105 (from Poisson(100))
-- Final length: 369 (grew via splits)
-- Generation time: ~36s for 100 steps
+- Initial length: 87 (from Poisson(100))
+- Final length: 104 (grew via splits)
+- Generation time: ~35s flow + ~8s decoder = ~43s total
+- Output: `sample_1_1.pdb` with all-atom coordinates
 
 ## Dependencies
 
