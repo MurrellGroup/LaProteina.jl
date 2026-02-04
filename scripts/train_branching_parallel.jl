@@ -1,8 +1,8 @@
 #!/usr/bin/env julia
-# Train Branching Flows model on precomputed VAE encoder outputs
+# Train Branching Flows model with parallel data loading
 #
 # Usage:
-#   julia scripts/train_branching.jl
+#   julia scripts/train_branching_parallel.jl
 #
 # Environment variables:
 #   SHARD_DIR - Directory containing precomputed shards
@@ -35,10 +35,13 @@ include(joinpath(@__DIR__, "..", "src", "branching", "branching_score_network.jl
 include(joinpath(@__DIR__, "..", "src", "branching", "branching_states.jl"))
 include(joinpath(@__DIR__, "..", "src", "branching", "branching_training.jl"))
 
+# CRITICAL: Override unsafe_free! for proper GPU memory management with DataLoader
+Flux.MLDataDevices.Internal.unsafe_free!(x) = (Flux.fmapstructure(Flux.MLDataDevices.Internal.unsafe_free_internal!, x); return nothing)
+
 Random.seed!(42)
 
 println("=" ^ 70)
-println("Branching Flows Training")
+println("Branching Flows Training (Parallel Data Loading)")
 println("=" ^ 70)
 
 # ============================================================================
@@ -144,16 +147,11 @@ function X0_sampler_train(root)
 end
 
 # ============================================================================
-# Training Loop
+# Parallel Data Loading Setup
 # ============================================================================
-println("\n=== Training ===")
+println("\n=== Setting up Parallel Data Loading ===")
 
-losses = Float32[]
-split_losses = Float32[]
-del_losses = Float32[]
-batch_times = Float64[]
-
-# Helper to convert protein to BranchingState (without index tracking for 2-process flow)
+# Helper to convert protein to BranchingState
 function protein_to_X1_simple(protein)
     ca_coords = protein.ca_coords
     z_mean = protein.z_mean
@@ -182,29 +180,25 @@ function protein_to_X1_simple(protein)
     )
 end
 
-println("Starting training loop...")
-println("Batch size: $batch_size, N batches: $n_batches")
-
-t_train_start = time()
-
-for batch_idx in 1:n_batches
-    t_batch = time()
-
-    # Sample batch of proteins
-    indices = rand(1:length(proteins), batch_size)
-    X1s = [protein_to_X1_simple(proteins[i]) for i in indices]
+"""
+Prepare a full training batch on CPU (called by DataLoader workers).
+Returns a NamedTuple with all tensors needed for training.
+"""
+function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_model)
+    # Convert proteins to BranchingStates
+    X1s = [protein_to_X1_simple(proteins_ref[i]) for i in indices]
 
     # Run branching_bridge
     t_dist = Uniform(0f0, 1f0)
     batch = branching_bridge(
-        P, X0_sampler_train, X1s, t_dist;
+        P_ref, X0_sampler, X1s, t_dist;
         coalescence_factor = 0.5,
-        use_branching_time_prob = 0.3,  # Sometimes sample at split times
+        use_branching_time_prob = 0.3,
         length_mins = nothing,
         deletion_pad = 0
     )
 
-    # Extract tensors (all on CPU initially)
+    # Extract tensors
     L_batch, B = size(batch.Xt.groupings)
     t_vec_cpu = Float32.(batch.t)
 
@@ -222,7 +216,7 @@ for batch_idx in 1:n_batches
     branchmask_cpu = Float32.(batch.Xt.branchmask)
     combined_mask_cpu = mask_cpu .* branchmask_cpu
 
-    # Targets (CPU)
+    # Targets
     x1_ca_target_cpu = tensor(batch.X1anchor[1])
     x1_ll_target_cpu = tensor(batch.X1anchor[2])
     if ndims(x1_ca_target_cpu) == 4
@@ -233,38 +227,96 @@ for batch_idx in 1:n_batches
     split_target_cpu = Float32.(batch.splits_target)
     del_target_cpu = Float32.(batch.del)
 
-    # Build CPU batch for feature extraction (OUTSIDE gradient context)
-    # This avoids Zygote mutation errors from bin_values operations
+    # Build CPU batch for feature extraction
     cpu_batch = Dict{Symbol, Any}(
         :x_t => Dict(:bb_ca => xt_ca_cpu, :local_latents => xt_ll_cpu),
         :t => Dict(:bb_ca => t_vec_cpu, :local_latents => t_vec_cpu),
         :mask => mask_cpu
     )
 
-    # Extract raw features on CPU
-    raw_features = extract_raw_features(model.base, cpu_batch)
+    # Extract raw features on CPU (the slow part we want to parallelize)
+    raw_features = extract_raw_features(base_model, cpu_batch)
 
-    # Move everything to GPU
-    xt_ca = dev(xt_ca_cpu)
-    xt_ll = dev(xt_ll_cpu)
-    mask = dev(mask_cpu)
-    combined_mask = dev(combined_mask_cpu)
-    x1_ca_target = dev(x1_ca_target_cpu)
-    x1_ll_target = dev(x1_ll_target_cpu)
-    split_target = dev(split_target_cpu)
-    del_target = dev(del_target_cpu)
-    t_vec = dev(t_vec_cpu)
+    return (
+        raw_features = raw_features,
+        xt_ca = xt_ca_cpu,
+        xt_ll = xt_ll_cpu,
+        mask = mask_cpu,
+        combined_mask = combined_mask_cpu,
+        x1_ca_target = x1_ca_target_cpu,
+        x1_ll_target = x1_ll_target_cpu,
+        split_target = split_target_cpu,
+        del_target = del_target_cpu,
+        t_vec = t_vec_cpu
+    )
+end
 
-    # Move raw features to GPU
+# BatchDataset for parallel loading (follows BranchChain pattern)
+# Each getindex call returns a fully prepared batch
+struct BatchDataset{P, S, M}
+    batch_indices::Vector{Vector{Int}}  # Pre-sampled batch indices
+    proteins::P
+    process::S
+    base_model::M
+end
+
+Base.length(x::BatchDataset) = length(x.batch_indices)
+
+# getindex returns the prepared batch - this is called by DataLoader workers in parallel
+function Base.getindex(x::BatchDataset, i::Int)
+    prepare_training_batch(x.batch_indices[i], x.proteins, x.process, X0_sampler_train, x.base_model)
+end
+
+# Pre-sample batch indices
+println("Pre-sampling batch indices...")
+batch_indices = [rand(1:length(proteins), batch_size) for _ in 1:n_batches]
+println("Created $(length(batch_indices)) batch index sets")
+
+# Create dataset and dataloader
+# batchsize=-1: each getindex returns one complete batch, no further batching
+# parallel=true: prepare next batch in background while current batch trains
+dataset = BatchDataset(batch_indices, proteins, P, cpu(model.base))
+dataloader = Flux.DataLoader(dataset; batchsize=-1, parallel=true)
+println("DataLoader created with parallel=true, batchsize=-1")
+
+# ============================================================================
+# Training Loop
+# ============================================================================
+println("\n=== Training ===")
+
+losses = Float32[]
+batch_times = Float64[]
+
+println("Starting training loop...")
+println("Batch size: $batch_size, N batches: $n_batches")
+
+t_train_start = time()
+
+for (batch_idx, bd) in enumerate(dataloader)
+    t_batch = time()
+
+    # With batchsize=-1, bd is the direct result from getindex (our prepared batch)
+
+    # Move to GPU
     raw_features_gpu = ScoreNetworkRawFeatures(
-        dev(raw_features.seq_raw),
-        dev(raw_features.cond_raw),
-        dev(raw_features.pair_raw),
-        dev(raw_features.pair_cond_raw),
-        dev(raw_features.mask)
+        dev(bd.raw_features.seq_raw),
+        dev(bd.raw_features.cond_raw),
+        dev(bd.raw_features.pair_raw),
+        dev(bd.raw_features.pair_cond_raw),
+        dev(bd.raw_features.mask)
     )
 
-    # Compute loss and gradients using forward_branching_from_raw_features
+    xt_ca = dev(bd.xt_ca)
+    xt_ll = dev(bd.xt_ll)
+    mask = dev(bd.mask)
+    combined_mask = dev(bd.combined_mask)
+    x1_ca_target = dev(bd.x1_ca_target)
+    x1_ll_target = dev(bd.x1_ll_target)
+    split_target = dev(bd.split_target)
+    del_target = dev(bd.del_target)
+    t_vec = dev(bd.t_vec)
+
+    # Compute loss and gradients
     loss, grads = Flux.withgradient(model) do m
         out = forward_branching_from_raw_features(m, raw_features_gpu)
 
@@ -320,6 +372,9 @@ for batch_idx in 1:n_batches
             CUDA.reclaim()
         end
     end
+
+    # Stop after n_batches
+    batch_idx >= n_batches && break
 end
 
 t_train = time() - t_train_start
