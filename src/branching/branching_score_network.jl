@@ -50,21 +50,26 @@ function BranchingScoreNetwork(base::ScoreNetwork; hidden_dim::Union{Int, Nothin
 
     hdim = isnothing(hidden_dim) ? token_dim : hidden_dim
 
+    # Scaled initialization (1/20 of default) for stable training
+    scaled_init(dims...) = Flux.glorot_uniform(dims...) .* 0.05f0
+
     # Time conditioning projection for indel heads
-    indel_time_proj = Dense(dim_cond => token_dim)
+    indel_time_proj = Dense(dim_cond => token_dim; init=scaled_init)
 
     # Split head: token_dim -> hidden -> 1 (log expected splits)
+    # Output layer scaled down 20x for stable initialization
     split_head = Chain(
         Dense(token_dim => hdim),
         x -> swish.(x),
-        Dense(hdim => 1, bias=false)
+        Dense(hdim => 1, bias=false, init=scaled_init)
     )
 
     # Deletion head: token_dim -> hidden -> 1 (logit)
+    # Output layer scaled down 20x for stable initialization
     del_head = Chain(
         Dense(token_dim => hdim),
         x -> swish.(x),
-        Dense(hdim => 1, bias=false)
+        Dense(hdim => 1, bias=false, init=scaled_init)
     )
 
     return BranchingScoreNetwork(base, indel_time_proj, split_head, del_head)

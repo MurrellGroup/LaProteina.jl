@@ -18,11 +18,12 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using LaProteina
 using LaProteina: ScoreNetworkRawFeatures, extract_raw_features, cpu
 using BranchingFlows
-using BranchingFlows: BranchingState, CoalescentFlow, branching_bridge
+using BranchingFlows: BranchingState, CoalescentFlow, branching_bridge, Deletion
 using ForwardBackward: ContinuousState, DiscreteState, tensor
-using Flowfusion: RDNFlow, MaskedState
-using Distributions: Uniform, Beta
+using Flowfusion: RDNFlow, MaskedState, floss, scalefloss
+using Distributions: Uniform, Beta, Poisson
 using Flux
+using Flux: Zygote
 using CUDA
 using Optimisers
 using Statistics
@@ -56,6 +57,10 @@ default_lr = stage == 1 ? 1e-4 : 1e-5
 lr = parse(Float64, get(ENV, "LR", string(default_lr)))
 latent_dim = 8
 
+# Branching parameters (matching BranchChain)
+X0_mean_length = 100
+deletion_pad = 1.1
+
 println("\n=== Configuration ===")
 println("Shard dir: $shard_dir")
 println("Weights dir: $weights_dir")
@@ -63,6 +68,8 @@ println("Batch size: $batch_size")
 println("N batches: $n_batches")
 println("Stage: $stage ($(stage == 1 ? "freeze base" : "full fine-tune"))")
 println("Learning rate: $lr")
+println("X0 mean length: $X0_mean_length")
+println("Deletion pad: $deletion_pad")
 
 # ============================================================================
 # GPU Check
@@ -188,14 +195,14 @@ function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_m
     # Convert proteins to BranchingStates
     X1s = [protein_to_X1_simple(proteins_ref[i]) for i in indices]
 
-    # Run branching_bridge
+    # Run branching_bridge (matching BranchChain settings)
     t_dist = Uniform(0f0, 1f0)
     batch = branching_bridge(
         P_ref, X0_sampler, X1s, t_dist;
-        coalescence_factor = 0.5,
-        use_branching_time_prob = 0.3,
-        length_mins = nothing,
-        deletion_pad = 0
+        coalescence_factor = 1.0,
+        use_branching_time_prob = 0.5,
+        length_mins = Poisson(X0_mean_length),
+        deletion_pad = deletion_pad
     )
 
     # Extract tensors
@@ -285,6 +292,9 @@ println("DataLoader created with parallel=true, batchsize=-1")
 println("\n=== Training ===")
 
 losses = Float32[]
+state_losses = Float32[]
+split_losses = Float32[]
+del_losses = Float32[]
 batch_times = Float64[]
 
 println("Starting training loop...")
@@ -298,6 +308,11 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
     # Transfer entire batch to GPU at once
     bd = dev(bd_cpu)
 
+    # Refs to capture individual losses for logging
+    state_loss_ref = Ref(0f0)
+    split_loss_ref = Ref(0f0)
+    del_loss_ref = Ref(0f0)
+
     # Compute loss and gradients
     loss, grads = Flux.withgradient(model) do m
         out = forward_branching_from_raw_features(m, bd.raw_features)
@@ -309,23 +324,32 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
         x1_ca = bd.xt_ca .+ (1f0 .- t_exp) .* v_ca
         x1_ll = bd.xt_ll .+ (1f0 .- t_exp) .* v_ll
 
-        # Time scaling
-        t_scale = 1f0 ./ max.(1f0 .- bd.t_vec, 1f-5).^2
+        # Time scaling with eps=0.1 (matching LaProteina conventions)
+        t_scale = 1f0 ./ max.(1f0 .- bd.t_vec, 0.1f0).^2
 
-        # CA loss
+        # CA loss (MSE with time scaling)
         ca_diff = (x1_ca .- bd.x1_ca_target).^2
         ca_loss = sum(ca_diff .* reshape(bd.mask, 1, size(bd.mask)...) .* reshape(t_scale, 1, 1, :)) / sum(bd.mask)
 
-        # Latent loss
+        # Latent loss (MSE with time scaling)
         ll_diff = (x1_ll .- bd.x1_ll_target).^2
         ll_loss = sum(ll_diff .* reshape(bd.mask, 1, size(bd.mask)...) .* reshape(t_scale, 1, 1, :)) / sum(bd.mask)
 
-        # Split loss (Bregman Poisson)
-        mu = exp.(out[:split])
-        split_l = sum((mu .- bd.split_target .* out[:split]) .* bd.combined_mask .* reshape(t_scale, 1, :)) / max(sum(bd.combined_mask), 1f0)
+        # Split/del time scaling (using Flowfusion's scalefloss, eps=0.2)
+        indel_scale = scalefloss(P, bd.t_vec, 1, 0.2f0)
 
-        # Del loss (BCE)
-        del_l = sum(((1f0 .- bd.del_target) .* out[:del] .+ log1p.(exp.(-out[:del]))) .* bd.combined_mask .* reshape(t_scale, 1, :)) / max(sum(bd.combined_mask), 1f0)
+        # Split loss using floss (Bregman Poisson via CoalescentFlow)
+        split_l = floss(P, out[:split], bd.split_target, bd.combined_mask, indel_scale)
+
+        # Del loss using floss (BCE via Deletion policy)
+        del_l = floss(P.deletion_policy, out[:del], bd.del_target, bd.combined_mask, indel_scale)
+
+        # Capture for logging (use Zygote.ignore to avoid gradient issues)
+        Zygote.ignore() do
+            state_loss_ref[] = Float32(cpu(ca_loss + ll_loss))
+            split_loss_ref[] = Float32(cpu(split_l))
+            del_loss_ref[] = Float32(cpu(del_l))
+        end
 
         # Total (weight split/del more in stage 1)
         if stage == 1
@@ -339,17 +363,22 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
     Optimisers.update!(opt_state, model, grads[1])
 
     push!(losses, Float32(cpu(loss)))
+    push!(state_losses, state_loss_ref[])
+    push!(split_losses, split_loss_ref[])
+    push!(del_losses, del_loss_ref[])
     push!(batch_times, time() - t_batch)
 
     # Logging
-    if batch_idx % 50 == 0 || batch_idx == 1
-        avg_loss = mean(losses[max(1, end-49):end])
-        avg_time = mean(batch_times[max(1, end-49):end]) * 1000
-        throughput = batch_size / (avg_time / 1000)
-        @printf("Batch %4d: loss=%.4f, time=%.0fms, throughput=%.1f samples/sec\n",
-                batch_idx, avg_loss, avg_time, throughput)
+    if batch_idx % 10 == 0 || batch_idx == 1
+        avg_loss = mean(losses[max(1, end-9):end])
+        avg_state = mean(state_losses[max(1, end-9):end])
+        avg_split = mean(split_losses[max(1, end-9):end])
+        avg_del = mean(del_losses[max(1, end-9):end])
+        avg_time = mean(batch_times[max(1, end-9):end]) * 1000
+        @printf("Batch %4d: total=%.2f, state=%.2f, split=%.2f, del=%.2f, time=%.0fms\n",
+                batch_idx, avg_loss, avg_state, avg_split, avg_del, avg_time)
 
-        if CUDA.functional()
+        if CUDA.functional() && batch_idx % 50 == 0
             GC.gc()
             CUDA.reclaim()
         end
