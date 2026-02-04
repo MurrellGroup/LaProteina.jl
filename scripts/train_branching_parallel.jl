@@ -51,15 +51,25 @@ println("=" ^ 70)
 shard_dir = get(ENV, "SHARD_DIR", expanduser("~/shared_data/afdb_laproteina/precomputed_shards"))
 weights_dir = get(ENV, "WEIGHTS_DIR", joinpath(@__DIR__, "..", "weights"))
 batch_size = parse(Int, get(ENV, "BATCH_SIZE", "4"))
-n_batches = parse(Int, get(ENV, "N_BATCHES", "1000"))
+n_batches = parse(Int, get(ENV, "N_BATCHES", "5000"))
 stage = parse(Int, get(ENV, "STAGE", "1"))
 default_lr = stage == 1 ? 1e-4 : 1e-5
 lr = parse(Float64, get(ENV, "LR", string(default_lr)))
 latent_dim = 8
 
+# Warmdown schedule: linear decay over last warmdown_batches
+# Default to 20% of n_batches or 1000, whichever is smaller
+default_warmdown = min(1000, n_batches ÷ 5)
+warmdown_batches = parse(Int, get(ENV, "WARMDOWN_BATCHES", string(default_warmdown)))
+warmdown_start = max(1, n_batches - warmdown_batches)  # Ensure warmdown doesn't start before batch 1
+
 # Branching parameters (matching BranchChain)
 X0_mean_length = 100
 deletion_pad = 1.1
+
+# State loss scaling (to match split/del magnitude ~1)
+# State loss is ~70, split/del ~0.5-1, so scale by ~0.01
+state_loss_scale = 0.01f0
 
 println("\n=== Configuration ===")
 println("Shard dir: $shard_dir")
@@ -68,8 +78,10 @@ println("Batch size: $batch_size")
 println("N batches: $n_batches")
 println("Stage: $stage ($(stage == 1 ? "freeze base" : "full fine-tune"))")
 println("Learning rate: $lr")
+println("Warmdown: last $warmdown_batches batches (starting at batch $warmdown_start)")
 println("X0 mean length: $X0_mean_length")
 println("Deletion pad: $deletion_pad")
+println("State loss scale: $state_loss_scale")
 
 # ============================================================================
 # GPU Check
@@ -351,12 +363,15 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
             del_loss_ref[] = Float32(cpu(del_l))
         end
 
-        # Total (weight split/del more in stage 1)
-        if stage == 1
-            ca_loss * 0.1f0 + ll_loss * 0.1f0 + split_l + del_l
-        else
-            ca_loss + ll_loss + split_l + del_l
-        end
+        # Total loss with state scaling to match split/del magnitude
+        (ca_loss + ll_loss) * state_loss_scale + split_l + del_l
+    end
+
+    # Linear warmdown: decay LR from base to near-zero over last warmdown_batches
+    if batch_idx >= warmdown_start
+        progress = (batch_idx - warmdown_start) / warmdown_batches
+        current_lr = lr * (1.0 - progress) + 1e-8 * progress
+        Flux.adjust!(opt_state, current_lr)
     end
 
     # Update
@@ -368,17 +383,26 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
     push!(del_losses, del_loss_ref[])
     push!(batch_times, time() - t_batch)
 
-    # Logging
-    if batch_idx % 10 == 0 || batch_idx == 1
-        avg_loss = mean(losses[max(1, end-9):end])
-        avg_state = mean(state_losses[max(1, end-9):end])
-        avg_split = mean(split_losses[max(1, end-9):end])
-        avg_del = mean(del_losses[max(1, end-9):end])
-        avg_time = mean(batch_times[max(1, end-9):end]) * 1000
-        @printf("Batch %4d: total=%.2f, state=%.2f, split=%.2f, del=%.2f, time=%.0fms\n",
-                batch_idx, avg_loss, avg_state, avg_split, avg_del, avg_time)
+    # Logging (every 100 batches for longer runs)
+    if batch_idx % 100 == 0 || batch_idx == 1
+        avg_loss = mean(losses[max(1, end-99):end])
+        avg_state = mean(state_losses[max(1, end-99):end])
+        avg_split = mean(split_losses[max(1, end-99):end])
+        avg_del = mean(del_losses[max(1, end-99):end])
+        avg_time = mean(batch_times[max(1, end-99):end]) * 1000
 
-        if CUDA.functional() && batch_idx % 50 == 0
+        # Show LR during warmdown
+        if batch_idx >= warmdown_start
+            progress = (batch_idx - warmdown_start) / warmdown_batches
+            current_lr = lr * (1.0 - progress) + 1e-8 * progress
+            @printf("Batch %5d: total=%.3f, state=%.2f, split=%.3f, del=%.3f, time=%.0fms, lr=%.2e (warmdown)\n",
+                    batch_idx, avg_loss, avg_state, avg_split, avg_del, avg_time, current_lr)
+        else
+            @printf("Batch %5d: total=%.3f, state=%.2f, split=%.3f, del=%.3f, time=%.0fms\n",
+                    batch_idx, avg_loss, avg_state, avg_split, avg_del, avg_time)
+        end
+
+        if CUDA.functional()
             GC.gc()
             CUDA.reclaim()
         end
