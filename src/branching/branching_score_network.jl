@@ -314,19 +314,17 @@ Saves only the indel heads by default (base weights come from pretrained).
 - `include_base`: Whether to also save base model weights (default: false)
 """
 function save_branching_weights(model::BranchingScoreNetwork, path::String; include_base::Bool=false)
-    # Always save indel head weights
-    weights = Dict{String, Any}(
-        "indel_time_proj" => Flux.state(model.indel_time_proj),
-        "split_head" => Flux.state(model.split_head),
-        "del_head" => Flux.state(model.del_head)
-    )
+    # Save using JLD2 directly
+    jldopen(path, "w") do file
+        file["indel_time_proj"] = Flux.state(model.indel_time_proj)
+        file["split_head"] = Flux.state(model.split_head)
+        file["del_head"] = Flux.state(model.del_head)
 
-    # Optionally save base model too
-    if include_base
-        weights["base"] = Flux.state(model.base)
+        # Optionally save base model too
+        if include_base
+            file["base"] = Flux.state(model.base)
+        end
     end
-
-    jldsave(path; weights...)
     return path
 end
 
