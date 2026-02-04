@@ -164,7 +164,7 @@ export
     load_score_network_weights!, load_decoder_weights!, load_encoder_weights!,
 
     # Training utilities - precomputed encoder
-    PrecomputedProtein, precompute_single_protein,
+    PrecomputedProteinNT, precompute_single_protein,
     precompute_dataset_sharded, precompute_dataset_single,
     load_precomputed_shard, batch_from_precomputed
 

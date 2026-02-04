@@ -128,7 +128,7 @@ for (shard_idx, shard_files) in enumerate(file_shards)
     shard_start = time()
     log_msg("--- Shard $shard_idx / $(length(file_shards)) ($(length(shard_files)) files) ---")
 
-    proteins = PrecomputedProtein[]
+    proteins = PrecomputedProteinNT[]
     failed = 0
     skipped = 0
 

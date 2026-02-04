@@ -1,33 +1,30 @@
 # Precompute VAE encoder outputs for training dataset
 # Saves minimal representation: CA coords + encoder mean/log_scale per position
+# Uses NamedTuples for portable serialization (no package-specific types)
 
 using JLD2
 using Random
 using Statistics
 
-"""
-    PrecomputedProtein
+# Type alias for precomputed protein data (NamedTuple for portable serialization)
+const PrecomputedProteinNT = NamedTuple{
+    (:ca_coords, :z_mean, :z_log_scale, :mask),
+    Tuple{Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}}
+}
 
-Minimal representation of a protein for flow matching training.
+"""
+    precompute_single_protein(encoder_cpu, encoder_gpu, data::Dict)
+
+Precompute encoder output for a single protein.
+Returns a NamedTuple with fields:
 - ca_coords: [3, L] centered CA coordinates in nm
 - z_mean: [latent_dim, L] encoder mean output
 - z_log_scale: [latent_dim, L] encoder log_scale output
 - mask: [L] residue mask (1.0 for valid, 0.0 for padding)
 
 At training time, z is sampled as: z = z_mean + randn() * exp(z_log_scale)
-"""
-struct PrecomputedProtein
-    ca_coords::Matrix{Float32}     # [3, L]
-    z_mean::Matrix{Float32}        # [latent_dim, L]
-    z_log_scale::Matrix{Float32}   # [latent_dim, L]
-    mask::Vector{Float32}          # [L]
-end
 
-"""
-    precompute_single_protein(encoder_cpu, encoder_gpu, data::Dict)
-
-Precompute encoder output for a single protein.
-Returns PrecomputedProtein or nothing if encoding fails.
+Returns nothing if encoding fails.
 """
 function precompute_single_protein(encoder_cpu::EncoderTransformer,
                                     encoder_gpu::EncoderTransformer,
@@ -60,11 +57,12 @@ function precompute_single_protein(encoder_cpu::EncoderTransformer,
         z_mean = cpu(enc_result[:mean][:, :, 1])  # [latent_dim, L]
         z_log_scale = cpu(enc_result[:log_scale][:, :, 1])  # [latent_dim, L]
 
-        return PrecomputedProtein(
-            Float32.(ca_coords_centered),
-            Float32.(z_mean),
-            Float32.(z_log_scale),
-            Float32.(data[:residue_mask])
+        # Return as NamedTuple (portable serialization)
+        return (
+            ca_coords = Float32.(ca_coords_centered),
+            z_mean = Float32.(z_mean),
+            z_log_scale = Float32.(z_log_scale),
+            mask = Float32.(data[:residue_mask])
         )
     catch e
         @warn "Failed to encode protein: $e"
@@ -123,7 +121,7 @@ function precompute_dataset_sharded(encoder_cpu::EncoderTransformer,
         end
 
         shard_indices = indices[start_idx:end_idx]
-        shard_proteins = PrecomputedProtein[]
+        shard_proteins = PrecomputedProteinNT[]
 
         if verbose
             println("Processing shard $shard_idx / $n_shards ($(length(shard_indices)) samples)...")
@@ -176,7 +174,7 @@ function precompute_dataset_single(encoder_cpu::EncoderTransformer,
         Random.shuffle!(indices)
     end
 
-    proteins = PrecomputedProtein[]
+    proteins = PrecomputedProteinNT[]
 
     for (i, data_idx) in enumerate(indices)
         protein = precompute_single_protein(encoder_cpu, encoder_gpu, data_list[data_idx])
@@ -204,7 +202,7 @@ end
     load_precomputed_shard(filepath::String)
 
 Load a precomputed shard from JLD2 file.
-Returns Vector{PrecomputedProtein}.
+Returns Vector of NamedTuples with fields: ca_coords, z_mean, z_log_scale, mask
 """
 function load_precomputed_shard(filepath::String)
     return load(filepath, "proteins")
@@ -285,9 +283,9 @@ function reset_epoch!(sampler::LengthBucketedSampler)
 end
 
 """
-    batch_from_precomputed(proteins::Vector{PrecomputedProtein}, indices::Vector{Int}, P)
+    batch_from_precomputed(proteins::Vector, indices::Vector{Int}, P)
 
-Create flow matching batch from precomputed proteins.
+Create flow matching batch from precomputed proteins (NamedTuples).
 Uses the schedule transforms defined in the RDNFlow processes P[1] (CA) and P[2] (latents).
 The schedule is now baked into Flowfusion's RDNFlow, ensuring consistency with inference.
 
