@@ -342,11 +342,30 @@ last_50 = losses[max(1, end-49):end]
 @printf("  Last 50 loss: %.4f\n", mean(last_50))
 @printf("  Change: %.2f%%\n", 100 * (mean(last_50) - mean(first_50)) / mean(first_50))
 
+# ============================================================================
+# Save Weights
+# ============================================================================
+println("\n=== Saving Weights ===")
+output_dir = get(ENV, "OUTPUT_DIR", weights_dir)
+mkpath(output_dir)
+
+# Save indel head weights (base weights are from pretrained)
+model_cpu = cpu(model)
+save_path = joinpath(output_dir, "branching_indel_stage$(stage).jld2")
+save_branching_weights(model_cpu, save_path; include_base=false)
+println("Saved indel head weights to: $save_path")
+
+# For stage 2, also save full model
+if stage == 2
+    full_save_path = joinpath(output_dir, "branching_full.jld2")
+    save_branching_weights(model_cpu, full_save_path; include_base=true)
+    println("Saved full model weights to: $full_save_path")
+end
+
 println("\nNext steps:")
 if stage == 1
     println("  - Run with STAGE=2 to fine-tune full model")
 end
-println("  - Save model weights")
 println("  - Test generation with branching")
 
 println("\nDone!")
