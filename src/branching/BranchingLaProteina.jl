@@ -50,8 +50,8 @@ export
     bregman_poisson_loss,
     logistic_bce_loss,
     staged_training_step!,
-    freeze_base_model!,
-    thaw_base_model!,
+    freeze_base_in_state!,
+    thaw_base_in_state!,
     setup_optimizer,
 
     # Inference

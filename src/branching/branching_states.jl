@@ -1,9 +1,9 @@
 # State construction utilities for Branching Flows
 # Converts LaProteina data to BranchingFlows state format
 
-using BranchingFlows: BranchingState
-using ForwardBackward: ContinuousState, DiscreteState, MaskedState
-using Flowfusion: element
+import BranchingFlows: BranchingState
+import ForwardBackward: ContinuousState, DiscreteState, tensor
+import Flowfusion: element, MaskedState
 
 """
     protein_to_branching_state(protein::NamedTuple; sample_z::Bool=true)

@@ -3,6 +3,7 @@
 
 using Flux
 using Statistics
+using Optimisers
 using BranchingFlows: branching_bridge, CoalescentFlow
 using Distributions: Uniform, Poisson
 
@@ -292,35 +293,42 @@ function staged_training_step!(model::BranchingScoreNetwork, batch, opt_state;
 end
 
 """
-    freeze_base_model!(model::BranchingScoreNetwork)
+    freeze_base_in_state!(opt_state, model::BranchingScoreNetwork)
 
-Freeze the base ScoreNetwork for stage 1 training.
+Freeze the base ScoreNetwork parameters in the optimizer state for stage 1 training.
 Only the indel heads (split_head, del_head, indel_time_proj) will be trainable.
 
-Use `thaw_base_model!` after stage 1 to unfreeze for full fine-tuning.
+Use `thaw_base_in_state!` after stage 1 to unfreeze for full fine-tuning.
 """
-function freeze_base_model!(model::BranchingScoreNetwork)
-    Flux.freeze!(model.base)
-    return model
+function freeze_base_in_state!(opt_state, model::BranchingScoreNetwork)
+    Optimisers.freeze!(opt_state.base)
+    return opt_state
 end
 
 """
-    thaw_base_model!(model::BranchingScoreNetwork)
+    thaw_base_in_state!(opt_state, model::BranchingScoreNetwork)
 
-Unfreeze the base ScoreNetwork for stage 2 full fine-tuning.
+Unfreeze the base ScoreNetwork parameters in the optimizer state for stage 2.
 """
-function thaw_base_model!(model::BranchingScoreNetwork)
-    Flux.thaw!(model.base)
-    return model
+function thaw_base_in_state!(opt_state, model::BranchingScoreNetwork)
+    Optimisers.thaw!(opt_state.base)
+    return opt_state
 end
 
 """
-    setup_optimizer(model::BranchingScoreNetwork, lr::Float64)
+    setup_optimizer(model::BranchingScoreNetwork, lr::Float64; freeze_base::Bool=false)
 
-Create optimizer state for training. Works with both frozen and unfrozen models.
-Flux.freeze!/thaw! controls which parameters are trainable.
+Create optimizer state for training.
+
+# Arguments
+- `model`: BranchingScoreNetwork
+- `lr`: Learning rate
+- `freeze_base`: If true, freeze the base model params (stage 1 training)
 """
-function setup_optimizer(model::BranchingScoreNetwork, lr::Float64)
-    using Optimisers
-    return Optimisers.setup(Adam(lr), model)
+function setup_optimizer(model::BranchingScoreNetwork, lr::Float64; freeze_base::Bool=false)
+    opt_state = Optimisers.setup(Optimisers.Adam(lr), model)
+    if freeze_base
+        freeze_base_in_state!(opt_state, model)
+    end
+    return opt_state
 end
