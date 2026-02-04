@@ -3,8 +3,14 @@
 # Processes files incrementally (not loading all into memory)
 # Saves to 10 sharded JLD2 files with randomized order
 #
-# Supports resuming: set START_SHARD env var to skip completed shards
-# e.g., START_SHARD=2 julia script.jl
+# Environment variables:
+#   START_SHARD - Resume from this shard (1-indexed), default 1
+#   AFDB_INPUT_DIR - Directory containing mmCIF files
+#   AFDB_OUTPUT_DIR - Directory for output shards
+#   LOGFILE - Path for progress log (default: precompute_progress.log in current dir)
+#
+# Example:
+#   START_SHARD=5 julia scripts/precompute_all_training_data.jl
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
@@ -15,8 +21,8 @@ using Random
 using Dates
 using JLD2
 
-# Log file for progress
-const LOGFILE = "/home/claudey/JuProteina/precompute_progress.log"
+# Configuration from environment variables with sensible defaults
+const LOGFILE = get(ENV, "LOGFILE", joinpath(pwd(), "precompute_progress.log"))
 
 function log_msg(msg)
     open(LOGFILE, "a") do f
@@ -25,7 +31,7 @@ function log_msg(msg)
     println(msg)
 end
 
-# IMPORTANT: Same seed as original run for reproducible shuffling
+# IMPORTANT: Same seed for reproducible shuffling (enables resume)
 Random.seed!(42)
 
 # Resume from this shard (1-indexed), default 1
@@ -48,8 +54,8 @@ log_msg("Memory: $(round(CUDA.available_memory() / 1e9, digits=2)) GB available"
 # ============================================================================
 # Configuration
 # ============================================================================
-afdb_dir = expanduser("~/shared_data/afdb_laproteina/raw")
-output_dir = expanduser("~/shared_data/afdb_laproteina/precomputed_shards")
+afdb_dir = get(ENV, "AFDB_INPUT_DIR", expanduser("~/shared_data/afdb_laproteina/raw"))
+output_dir = get(ENV, "AFDB_OUTPUT_DIR", expanduser("~/shared_data/afdb_laproteina/precomputed_shards"))
 n_shards = 10
 min_length = 30
 max_length = 256
