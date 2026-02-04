@@ -4,9 +4,9 @@ Test GPU-accelerated sampling with Flowfusion gen() API.
 """
 
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
+Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using Random
 using CUDA
 
@@ -21,10 +21,10 @@ else
 end
 
 # Paths
-weights_dir = "/home/claudey/JuProteina/JuProteina/weights"
+weights_dir = joinpath(@__DIR__, "..", "weights")
 score_net_path = joinpath(weights_dir, "score_network.npz")
 decoder_path = joinpath(weights_dir, "decoder.npz")
-output_dir = "/home/claudey/JuProteina/JuProteina/test/samples_gpu_110"
+output_dir = joinpath(@__DIR__, "samples_gpu_110"
 mkpath(output_dir)
 
 println("\n=== Loading Models ===")

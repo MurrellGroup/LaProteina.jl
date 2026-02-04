@@ -4,7 +4,8 @@ Debug transformer layer values.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/BFlaproteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 import torch_scatter_compat
 
 import numpy as np
@@ -15,11 +16,11 @@ from omegaconf import OmegaConf
 from proteinfoundation.nn.local_latents_transformer import LocalLatentsTransformer
 
 # Load checkpoint
-ckpt_path = "/home/claudey/BFlaproteina/la-proteina/checkpoints_laproteina/LD1_ucond_notri_512.ckpt"
+ckpt_path = os.path.join(la_proteina, "checkpoints_laproteina", "LD1_ucond_notri_512.ckpt"
 ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
 # Load config
-config = OmegaConf.load("/home/claudey/BFlaproteina/la-proteina/configs/nn/local_latents_score_nn_160M.yaml")
+config = OmegaConf.load(os.path.join(la_proteina, "configs", "nn/local_latents_score_nn_160M.yaml")
 config.feats_seq = list(config.feats_seq) + ["cropped_flag_seq"]
 
 # Create model
@@ -58,7 +59,7 @@ batch = {
     'mask': residue_mask.bool()
 }
 
-output_dir = Path('/home/claudey/JuProteina/JuProteina/test')
+output_dir = Path(__file__).parent
 
 with torch.no_grad():
     # Manually step through the model

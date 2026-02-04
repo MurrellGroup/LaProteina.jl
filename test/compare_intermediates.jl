@@ -4,17 +4,17 @@ Compare Julia intermediate values with Python reference.
 """
 
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
+Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using NPZ
 using Flux
 using LinearAlgebra
 using Statistics
 
 # Paths
-test_dir = "/home/claudey/JuProteina/JuProteina/test"
-weights_path = "/home/claudey/JuProteina/JuProteina/weights/score_network.npz"
+test_dir = @__DIR__
+weights_path = joinpath(@__DIR__, "..", "weights", "score_network.npz")
 
 # Load Python reference data
 println("Loading Python intermediate data...")

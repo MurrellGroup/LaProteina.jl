@@ -5,7 +5,8 @@ Saves all intermediate values for comparison with Julia.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/BFlaproteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 
 # Import torch_scatter compat before proteinfoundation imports
 import torch_scatter_compat
@@ -15,7 +16,7 @@ import torch
 from pathlib import Path
 
 # Load pretrained checkpoint
-ckpt_path = "/home/claudey/BFlaproteina/la-proteina/checkpoints_laproteina/LD1_ucond_notri_512.ckpt"
+ckpt_path = os.path.join(la_proteina, "checkpoints_laproteina", "LD1_ucond_notri_512.ckpt"
 ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
 # Extract the score network (nn)
@@ -23,7 +24,7 @@ from proteinfoundation.nn.local_latents_transformer import LocalLatentsTransform
 from omegaconf import OmegaConf
 
 # Create model with correct config
-config = OmegaConf.load("/home/claudey/BFlaproteina/la-proteina/configs/nn/local_latents_score_nn_160M.yaml")
+config = OmegaConf.load(os.path.join(la_proteina, "configs", "nn/local_latents_score_nn_160M.yaml")
 
 # Pass full config as kwargs
 model = LocalLatentsTransformer(**OmegaConf.to_container(config))
@@ -157,7 +158,7 @@ print(f"Diff between manual and full pair_repr_builder: {diff}")
 # Save all intermediate values
 # ============================================================================
 
-output_dir = Path('/home/claudey/JuProteina/JuProteina/test')
+output_dir = Path(__file__).parent
 
 # Save inputs
 np.save(output_dir / 'pair_debug_x_t_bb_ca.npy', x_t['bb_ca'].numpy())

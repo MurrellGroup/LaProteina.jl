@@ -1,7 +1,7 @@
-# JuProteina Test Suite
+# LaProteina Test Suite
 
 using Test
-using JuProteina
+using LaProteina
 
 @testset "JuProteina Tests" begin
     include("test_constants.jl")

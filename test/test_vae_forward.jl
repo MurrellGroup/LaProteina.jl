@@ -4,7 +4,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using Test
 using Statistics
 

@@ -5,19 +5,19 @@ Verify geometry by checking CA-CA distances.
 """
 
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
+Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using Random
 
 # Set random seed for reproducibility
 Random.seed!(123)
 
 # Paths
-weights_dir = "/home/claudey/JuProteina/JuProteina/weights"
+weights_dir = joinpath(@__DIR__, "..", "weights")
 score_net_path = joinpath(weights_dir, "score_network.npz")
 decoder_path = joinpath(weights_dir, "decoder.npz")
-output_dir = "/home/claudey/JuProteina/JuProteina/test/samples_110"
+output_dir = joinpath(@__DIR__, "samples_110"
 
 println("=== Creating ScoreNetwork ===")
 score_net = ScoreNetwork(

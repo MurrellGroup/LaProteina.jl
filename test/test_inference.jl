@@ -4,19 +4,19 @@ Test inference: generate protein samples and save to PDB.
 """
 
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
+Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using Random
 
 # Set random seed for reproducibility
 Random.seed!(42)
 
 # Paths
-weights_dir = "/home/claudey/JuProteina/JuProteina/weights"
+weights_dir = joinpath(@__DIR__, "..", "weights")
 score_net_path = joinpath(weights_dir, "score_network.npz")
 decoder_path = joinpath(weights_dir, "decoder.npz")
-output_dir = "/home/claudey/JuProteina/JuProteina/test/samples"
+output_dir = joinpath(@__DIR__, "samples"
 
 println("=== Creating ScoreNetwork ===")
 score_net = ScoreNetwork(

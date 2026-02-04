@@ -12,9 +12,9 @@ using LinearAlgebra
 using Statistics
 using Flux
 
-# Import JuProteina
-include(joinpath(@__DIR__, "..", "src", "JuProteina.jl"))
-using .JuProteina
+# Import LaProteina
+include(joinpath(@__DIR__, "..", "src", "LaProteina.jl"))
+using .LaProteina
 
 # ============================================================================
 # Helper functions
@@ -154,7 +154,7 @@ pair_proj_py = Float32.(npzread(joinpath(test_dir, "pair_debug_pair_proj.npy")))
 pair_proj_ln_py = Float32.(npzread(joinpath(test_dir, "pair_debug_pair_proj_ln.npy")))
 
 # Load weights
-weights_path = joinpath(@__DIR__, "..", "weights", "score_network.npz")
+weights_path = joinpath(@__DIR__, "..", "weights", "score_network.npz"))
 weights = npzread(weights_path)
 
 proj_weight = Float32.(weights["pair_repr_builder.init_repr_factory.linear_out.weight"])  # [256, 217]

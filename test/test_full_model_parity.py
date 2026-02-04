@@ -5,7 +5,8 @@ with trained weights and save outputs for comparison with Julia.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/BFlaproteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 import torch_scatter_compat  # Must be before proteinfoundation imports
 
 import numpy as np
@@ -17,11 +18,11 @@ from omegaconf import OmegaConf
 from proteinfoundation.nn.local_latents_transformer import LocalLatentsTransformer
 
 # Load checkpoint
-ckpt_path = "/home/claudey/BFlaproteina/la-proteina/checkpoints_laproteina/LD1_ucond_notri_512.ckpt"
+ckpt_path = os.path.join(la_proteina, "checkpoints_laproteina", "LD1_ucond_notri_512.ckpt"
 ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
 # Load config
-config = OmegaConf.load("/home/claudey/BFlaproteina/la-proteina/configs/nn/local_latents_score_nn_160M.yaml")
+config = OmegaConf.load(os.path.join(la_proteina, "configs", "nn/local_latents_score_nn_160M.yaml")
 
 # Add cropped_flag_seq to match checkpoint (checkpoint was trained with this feature)
 config.feats_seq = list(config.feats_seq) + ["cropped_flag_seq"]
@@ -89,7 +90,7 @@ print(f"  bb_ca[0, 0, :]: {bb_ca_out[0, 0, :]}")
 print(f"  local_latents[0, 0, :5]: {local_latents_out[0, 0, :5]}")
 
 # Save for Julia comparison
-output_dir = Path('/home/claudey/JuProteina/JuProteina/test')
+output_dir = Path(__file__).parent
 np.save(output_dir / 'full_model_x_t_bb_ca.npy', x_t['bb_ca'].numpy())
 np.save(output_dir / 'full_model_x_t_local_latents.npy', x_t['local_latents'].numpy())
 np.save(output_dir / 'full_model_x_sc_bb_ca.npy', x_sc['bb_ca'].numpy())

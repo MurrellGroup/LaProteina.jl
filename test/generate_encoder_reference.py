@@ -5,7 +5,8 @@ Creates inputs and outputs from the pretrained encoder to compare with Julia.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/JuProteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 import torch_scatter_compat  # Must be before proteinfoundation imports
 
 import numpy as np
@@ -14,8 +15,8 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 # Load the encoder from checkpoint
-ckpt_path = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina/AE1_ucond_512.ckpt"
-config_path = "/home/claudey/JuProteina/la-proteina/configs/nn_ae/nn_130m.yaml"
+ckpt_path = os.path.join(la_proteina, "checkpoints_laproteina", "AE1_ucond_512.ckpt"
+config_path = os.path.join(la_proteina, "configs", "nn_ae/nn_130m.yaml"
 
 print(f"Loading config from {config_path}")
 config = OmegaConf.load(config_path)
@@ -125,7 +126,7 @@ for k, v in output.items():
         print(f"  {k}: {type(v)}")
 
 # Save inputs and outputs
-output_dir = Path("/home/claudey/JuProteina/JuProteina/test/data")
+output_dir = Path(__file__).parent / "data"
 output_dir.mkdir(exist_ok=True)
 
 # Save inputs

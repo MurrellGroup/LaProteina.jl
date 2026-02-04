@@ -5,16 +5,16 @@ Compares ODE vs SDE sampling results with per-modality settings.
 """
 
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
+Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using Random
 
 # Set random seed
 Random.seed!(789)
 
 # Paths
-weights_dir = "/home/claudey/JuProteina/JuProteina/weights"
+weights_dir = joinpath(@__DIR__, "..", "weights")
 score_net_path = joinpath(weights_dir, "score_network.npz")
 
 println("=== Loading ScoreNetwork ===")

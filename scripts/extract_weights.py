@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""Extract PyTorch weights and save as NPZ for Julia loading."""
+"""
+Extract PyTorch weights and save as NPZ for Julia loading.
+
+Usage:
+    LA_PROTEINA_PATH=/path/to/la-proteina python extract_weights.py
+
+Environment variables:
+    LA_PROTEINA_PATH: Path to la-proteina repository with checkpoints
+    OUTPUT_DIR: Output directory for weights (default: ../weights)
+"""
 
 import torch
 import numpy as np
 import os
 import sys
+from pathlib import Path
 
 def extract_ld1_weights(checkpoint_path, output_path):
     """Extract score network weights from LD1 checkpoint."""
@@ -46,9 +56,18 @@ def extract_ae1_weights(checkpoint_path, output_path):
     return weights
 
 if __name__ == "__main__":
-    base_dir = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina"
-    out_dir = "/home/claudey/JuProteina/JuProteina/weights"
+    script_dir = Path(__file__).parent
+
+    # Get paths from environment or use defaults
+    la_proteina_path = os.environ.get('LA_PROTEINA_PATH', '')
+    base_dir = os.path.join(la_proteina_path, "checkpoints_laproteina") if la_proteina_path else None
+    out_dir = os.environ.get('OUTPUT_DIR', str(script_dir.parent / "weights"))
     os.makedirs(out_dir, exist_ok=True)
+
+    if not base_dir or not os.path.exists(base_dir):
+        print("Error: Set LA_PROTEINA_PATH to point to la-proteina repository")
+        print("Usage: LA_PROTEINA_PATH=/path/to/la-proteina python extract_weights.py")
+        sys.exit(1)
 
     # Extract score network weights
     ld1_path = os.path.join(base_dir, "LD1_ucond_notri_512.ckpt")

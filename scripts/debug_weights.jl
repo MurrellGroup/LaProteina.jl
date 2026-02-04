@@ -1,7 +1,7 @@
 using Pkg
 Pkg.activate(dirname(@__DIR__))
 
-using JuProteina
+using LaProteina
 using NPZ
 
 weights = npzread(joinpath(dirname(@__DIR__), "weights", "score_network.npz"))

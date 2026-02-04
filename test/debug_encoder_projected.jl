@@ -3,7 +3,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using NPZ
 using Statistics
 using Flux

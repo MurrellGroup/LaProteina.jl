@@ -1,12 +1,12 @@
 #!/usr/bin/env julia
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
-using JuProteina
+Pkg.activate(joinpath(@__DIR__, ".."))
+using LaProteina
 using Random
 using CUDA
 
 println("=== Comparing GPU vs CPU for L=100 ===")
-weights_dir = "/home/claudey/JuProteina/JuProteina/weights"
+weights_dir = joinpath(@__DIR__, "..", "weights")
 score_net = ScoreNetwork(n_layers=14, token_dim=768, n_heads=12, latent_dim=8, dim_cond=256, t_emb_dim=256, pair_dim=256)
 load_score_network_weights!(score_net, joinpath(weights_dir, "score_network.npz"))
 

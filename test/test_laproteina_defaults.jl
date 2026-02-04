@@ -5,17 +5,17 @@ Saves all samples to PDB for inspection.
 """
 
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
+Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using Random
 
 Random.seed!(42)
 
-weights_dir = "/home/claudey/JuProteina/JuProteina/weights"
+weights_dir = joinpath(@__DIR__, "..", "weights")
 score_net_path = joinpath(weights_dir, "score_network.npz")
 decoder_path = joinpath(weights_dir, "decoder.npz")
-output_dir = "/home/claudey/JuProteina/JuProteina/test/samples_laproteina_defaults"
+output_dir = joinpath(@__DIR__, "samples_laproteina_defaults"
 
 println("=== Loading Models ===")
 score_net = ScoreNetwork(

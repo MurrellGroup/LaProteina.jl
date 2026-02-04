@@ -5,7 +5,8 @@ Uses la-proteina's PDB loading to compare with Julia implementation.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/JuProteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 
 import numpy as np
 from pathlib import Path
@@ -15,8 +16,8 @@ from openfold.np import protein as protein_np
 from openfold.np import residue_constants
 
 # Use a sample PDB file
-pdb_path = Path("/home/claudey/JuProteina/JuProteina/test/samples_gpu/gpu_sde_1.pdb")
-output_dir = Path("/home/claudey/JuProteina/JuProteina/test/data")
+pdb_path = Path(__file__).parent / "samples_gpu" / "gpu_sde_1.pdb"
+output_dir = Path(__file__).parent / "data"
 
 print(f"Loading PDB from {pdb_path}")
 

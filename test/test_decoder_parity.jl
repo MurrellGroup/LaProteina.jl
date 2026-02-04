@@ -7,17 +7,17 @@ Run generate_decoder_reference.py first to create the reference data.
 """
 
 using Pkg
-Pkg.activate("/home/claudey/JuProteina/JuProteina")
+Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using NPZ
 using Flux
 using LinearAlgebra
 using Statistics
 
 # Paths
-test_dir = "/home/claudey/JuProteina/JuProteina/test"
-weights_path = "/home/claudey/JuProteina/JuProteina/weights/decoder.npz"
+test_dir = @__DIR__
+weights_path = joinpath(@__DIR__, "..", "weights", "decoder.npz")
 
 # Check if reference data exists
 if !isfile(joinpath(test_dir, "decoder_z_latent.npy"))

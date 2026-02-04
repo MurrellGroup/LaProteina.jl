@@ -4,7 +4,7 @@ Julia parity tests against Python la-proteina reference data.
 Run this after running parity_test.py to generate reference data.
 
 Usage:
-    cd JuProteina/JuProteina
+    cd LaProteina
     julia --project=. test/run_parity.jl
 """
 
@@ -17,11 +17,11 @@ using LinearAlgebra
 using Statistics
 using Flux
 
-# Import JuProteina
-include(joinpath(@__DIR__, "..", "src", "JuProteina.jl"))
-using .JuProteina
+# Import LaProteina
+include(joinpath(@__DIR__, "..", "src", "LaProteina.jl"))
+using .LaProteina
 
-const PARITY_DATA_DIR = "/home/claudey/JuProteina/parity_data"
+const PARITY_DATA_DIR = get(ENV, "PARITY_DATA_DIR", joinpath(@__DIR__, "..", "..", "parity_data"))
 
 """Load numpy file and convert to Julia array format."""
 function load_npy(name::String)
@@ -663,7 +663,7 @@ end
 
 function main()
     println("=" ^ 60)
-    println("JuProteina Parity Tests")
+    println("LaProteina Parity Tests")
     println("=" ^ 60)
 
     if !isdir(PARITY_DATA_DIR)

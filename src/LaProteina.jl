@@ -1,4 +1,4 @@
-module JuProteina
+module LaProteina
 
 using LinearAlgebra
 using Statistics

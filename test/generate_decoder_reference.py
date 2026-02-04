@@ -7,7 +7,8 @@ with deterministic test inputs, saving outputs for comparison with Julia.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/JuProteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 import torch_scatter_compat  # Must be before proteinfoundation imports
 
 import numpy as np
@@ -19,7 +20,7 @@ from omegaconf import OmegaConf
 from proteinfoundation.partial_autoencoder.decoder import DecoderTransformer
 
 # Checkpoint path
-ckpt_path = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina/AE1_ucond_512.ckpt"
+ckpt_path = os.path.join(la_proteina, "checkpoints_laproteina", "AE1_ucond_512.ckpt"
 
 # Load checkpoint - it contains the hyperparameters used for training
 ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
@@ -30,9 +31,9 @@ cfg_ae = hparams.get('cfg_ae', None)
 
 if cfg_ae is None:
     # Fallback to config file
-    config_path = "/home/claudey/JuProteina/la-proteina/configs/training_ae.yaml"
+    config_path = os.path.join(la_proteina, "configs", "training_ae.yaml"
     config = OmegaConf.load(config_path)
-    nn_ae_config = OmegaConf.load("/home/claudey/JuProteina/la-proteina/configs/nn_ae/nn_130m.yaml")
+    nn_ae_config = OmegaConf.load(os.path.join(la_proteina, "configs", "nn_ae/nn_130m.yaml")
     config.nn_ae = nn_ae_config
     cfg_ae = config
 
@@ -107,7 +108,7 @@ print(f"  Input CA[0, 0, :]: {ca_coors[0, 0, :]}")
 print(f"  Output CA[0, 0, :]: {coors_nm[0, 0, 1, :]}")
 
 # Save for Julia comparison
-output_dir = Path('/home/claudey/JuProteina/JuProteina/test')
+output_dir = Path(__file__).parent
 
 # Save inputs
 np.save(output_dir / 'decoder_z_latent.npy', z_latent.numpy())

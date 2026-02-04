@@ -5,7 +5,7 @@
 using Pkg
 Pkg.activate(".")
 
-using JuProteina
+using LaProteina
 using Random
 using Statistics
 

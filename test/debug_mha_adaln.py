@@ -4,7 +4,8 @@ Debug MHA ADALN step.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/BFlaproteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 import torch_scatter_compat
 
 import numpy as np
@@ -15,11 +16,11 @@ from omegaconf import OmegaConf
 from proteinfoundation.nn.local_latents_transformer import LocalLatentsTransformer
 
 # Load checkpoint
-ckpt_path = "/home/claudey/BFlaproteina/la-proteina/checkpoints_laproteina/LD1_ucond_notri_512.ckpt"
+ckpt_path = os.path.join(la_proteina, "checkpoints_laproteina", "LD1_ucond_notri_512.ckpt"
 ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
 
 # Load config
-config = OmegaConf.load("/home/claudey/BFlaproteina/la-proteina/configs/nn/local_latents_score_nn_160M.yaml")
+config = OmegaConf.load(os.path.join(la_proteina, "configs", "nn/local_latents_score_nn_160M.yaml")
 config.feats_seq = list(config.feats_seq) + ["cropped_flag_seq"]
 
 # Create model
@@ -114,7 +115,7 @@ with torch.no_grad():
     print(f"  normed * gamma + beta: {out_manual[0, 0, :5]}")
 
     # Save intermediate for Julia comparison
-    output_dir = Path('/home/claudey/JuProteina/JuProteina/test')
+    output_dir = Path(__file__).parent
     np.save(output_dir / 'debug_normed.npy', normed.numpy())
     np.save(output_dir / 'debug_normed_cond.npy', normed_cond.numpy())
     np.save(output_dir / 'debug_gamma.npy', gamma.numpy())
@@ -144,7 +145,7 @@ with torch.no_grad():
     print(f"x_mha stats: min={x_mha.min():.4f} max={x_mha.max():.4f}")
 
     # Save intermediate for Julia comparison
-    output_dir = Path('/home/claudey/JuProteina/JuProteina/test')
+    output_dir = Path(__file__).parent
     np.save(output_dir / 'debug_mha_adaln_out.npy', x_adaln.numpy())
     np.save(output_dir / 'debug_mha_attn_out.npy', x_attn.numpy())
     np.save(output_dir / 'debug_mha_scale_out.npy', x_scaled.numpy())

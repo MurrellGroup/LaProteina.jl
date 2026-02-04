@@ -2,19 +2,38 @@
 """
 Extract encoder weights from AE1_ucond_512.ckpt to encoder.npz format
 for use in Julia.
+
+Usage:
+    LA_PROTEINA_PATH=/path/to/la-proteina python extract_encoder_weights.py
+
+Environment variables:
+    LA_PROTEINA_PATH: Path to la-proteina repository (required)
+    CKPT_PATH: Path to checkpoint (default: LA_PROTEINA_PATH/checkpoints_laproteina/AE1_ucond_512.ckpt)
+    OUTPUT_PATH: Output path for weights (default: ../weights/encoder.npz)
 """
 
+import os
 import sys
-sys.path.insert(0, '/home/claudey/JuProteina/la-proteina')
-import torch_scatter_compat  # Must be before proteinfoundation imports
+from pathlib import Path
+
+# Get la-proteina path from environment
+la_proteina_path = os.environ.get('LA_PROTEINA_PATH')
+if la_proteina_path:
+    sys.path.insert(0, la_proteina_path)
+    import torch_scatter_compat  # Must be before proteinfoundation imports
 
 import numpy as np
 import torch
-from pathlib import Path
 
-# Checkpoint path
-ckpt_path = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina/AE1_ucond_512.ckpt"
-output_path = "/home/claudey/JuProteina/JuProteina/weights/encoder.npz"
+# Paths with defaults
+script_dir = Path(__file__).parent
+default_ckpt = Path(la_proteina_path) / "checkpoints_laproteina/AE1_ucond_512.ckpt" if la_proteina_path else None
+ckpt_path = os.environ.get('CKPT_PATH', str(default_ckpt) if default_ckpt else None)
+output_path = os.environ.get('OUTPUT_PATH', str(script_dir.parent / "weights" / "encoder.npz"))
+
+if not ckpt_path or not Path(ckpt_path).exists():
+    print("Error: Checkpoint not found. Set LA_PROTEINA_PATH or CKPT_PATH environment variable.")
+    sys.exit(1)
 
 print(f"Loading checkpoint from {ckpt_path}")
 ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)

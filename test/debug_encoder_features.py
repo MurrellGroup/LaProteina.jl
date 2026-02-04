@@ -4,7 +4,8 @@ Debug encoder features - save intermediate outputs for comparison with Julia.
 """
 
 import sys
-sys.path.insert(0, '/home/claudey/JuProteina/la-proteina')
+la_proteina = os.environ.get('LA_PROTEINA_PATH', '')
+if la_proteina: sys.path.insert(0, la_proteina)
 import torch_scatter_compat
 
 import numpy as np
@@ -12,8 +13,8 @@ import torch
 from pathlib import Path
 from omegaconf import OmegaConf
 
-ckpt_path = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina/AE1_ucond_512.ckpt"
-config_path = "/home/claudey/JuProteina/la-proteina/configs/nn_ae/nn_130m.yaml"
+ckpt_path = os.path.join(la_proteina, "checkpoints_laproteina", "AE1_ucond_512.ckpt"
+config_path = os.path.join(la_proteina, "configs", "nn_ae/nn_130m.yaml"
 
 print(f"Loading config and checkpoint...")
 config = OmegaConf.load(config_path)
@@ -65,7 +66,7 @@ batch = {
     },
 }
 
-output_dir = Path("/home/claudey/JuProteina/JuProteina/test/data")
+output_dir = Path(__file__).parent / "data"
 
 # Save inputs for Julia
 np.save(output_dir / "encoder_debug_coords_nm.npy", coords_a37.numpy())

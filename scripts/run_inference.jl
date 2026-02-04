@@ -5,13 +5,13 @@
 using Pkg
 Pkg.activate(dirname(@__DIR__))
 
-using JuProteina
+using LaProteina
 using Random
 using Statistics
 
 function main()
     println("=" ^ 70)
-    println("La-Proteina Inference in Julia (JuProteina)")
+    println("La-Proteina Inference in Julia (LaProteina)")
     println("=" ^ 70)
 
     # Paths

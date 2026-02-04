@@ -3,7 +3,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using Flux
 using CUDA
 using Statistics
@@ -24,7 +24,7 @@ model = ScoreNetwork(
     qk_ln=true, update_pair_repr=false
 )
 
-weights_path = joinpath(@__DIR__, "..", "weights", "score_network.npz")
+weights_path = joinpath(@__DIR__, "..", "weights", "score_network.npz"))
 if isfile(weights_path)
     println("Loading pretrained weights...")
     load_score_network_weights!(model, weights_path)

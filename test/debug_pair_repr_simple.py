@@ -112,7 +112,7 @@ print(f"  Expected: (1, 5, 5, 217)")
 print("\n=== Applying Projection ===")
 
 # Load weights from NPZ
-weights_path = Path("/home/claudey/JuProteina/JuProteina/weights/score_network.npz")
+weights_path = Path(__file__).parent.parent / "weights" / "score_network.npz"
 weights = np.load(weights_path)
 
 proj_weight = weights['pair_repr_builder.init_repr_factory.linear_out.weight']  # [256, 217]
@@ -255,7 +255,7 @@ print(f"Final pair repr range: [{final_pair_repr.min():.4f}, {final_pair_repr.ma
 # Save all intermediate values
 # ============================================================================
 
-output_dir = Path('/home/claudey/JuProteina/JuProteina/test')
+output_dir = Path(__file__).parent
 
 # Save inputs (Python format [B, L, D])
 np.save(output_dir / 'pair_debug_x_t_bb_ca.npy', x_t_bb_ca)

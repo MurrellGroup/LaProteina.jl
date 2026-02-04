@@ -15,7 +15,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using JuProteina
+using LaProteina
 using CUDA
 using Random
 using Dates

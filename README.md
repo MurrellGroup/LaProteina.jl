@@ -1,10 +1,10 @@
-# JuProteina
+# LaProteina
 
 Julia port of NVIDIA's [la-proteina](https://github.com/NVIDIA/la-proteina) protein generation model with exact numerical parity to the Python implementation.
 
 ## Overview
 
-JuProteina implements flow matching on protein structure space for unconditional protein generation. The model architecture consists of:
+LaProteina implements flow matching on protein structure space for unconditional protein generation. The model architecture consists of:
 
 - **VAE Encoder**: 12-layer transformer that encodes all-atom protein structures into per-residue latent representations (mean and log_scale for 8D latents)
 - **ScoreNetwork**: 14-layer transformer (160M parameters) that predicts velocity fields for flow matching on CA coordinates and local latent representations
@@ -44,7 +44,7 @@ Training uses a two-stage approach for efficiency:
 Since the VAE encoder is frozen during ScoreNetwork training, we precompute encoder outputs once:
 
 ```bash
-cd JuProteina
+cd LaProteina
 julia scripts/precompute_all_training_data.jl
 ```
 
@@ -75,7 +75,7 @@ START_SHARD=5 julia scripts/precompute_all_training_data.jl
 Train the ScoreNetwork on precomputed data:
 
 ```julia
-using JuProteina
+using LaProteina
 using Flux, CUDA, Optimisers
 import Flowfusion: RDNFlow
 
@@ -180,13 +180,13 @@ python scripts/extract_encoder_weights.py \
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/MurrellGroup/JuProteina.jl")
+Pkg.add(url="https://github.com/MurrellGroup/LaProteina.jl")
 ```
 
 ## Quick Start: Inference
 
 ```julia
-using JuProteina
+using LaProteina
 
 # Load models
 score_net = ScoreNetwork(
@@ -281,9 +281,9 @@ This package uses `PyTorchLayerNorm` which computes `sqrt(var + eps)` instead of
 ## File Structure
 
 ```
-JuProteina/
+LaProteina/
 ├── src/
-│   ├── JuProteina.jl              # Main module
+│   ├── LaProteina.jl              # Main module
 │   ├── constants.jl               # Amino acid constants
 │   ├── utils.jl                   # Tensor utilities, PyTorchLayerNorm
 │   ├── inference.jl               # Legacy flow matching sampling
