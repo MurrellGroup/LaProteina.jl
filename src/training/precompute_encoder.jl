@@ -1,5 +1,5 @@
 # Precompute VAE encoder outputs for training dataset
-# Saves minimal representation: CA coords + z_latent per position
+# Saves minimal representation: CA coords + encoder mean/log_scale per position
 
 using JLD2
 using Random
@@ -10,13 +10,17 @@ using Statistics
 
 Minimal representation of a protein for flow matching training.
 - ca_coords: [3, L] centered CA coordinates in nm
-- z_latent: [8, L] encoder mean output (deterministic)
+- z_mean: [latent_dim, L] encoder mean output
+- z_log_scale: [latent_dim, L] encoder log_scale output
 - mask: [L] residue mask (1.0 for valid, 0.0 for padding)
+
+At training time, z is sampled as: z = z_mean + randn() * exp(z_log_scale)
 """
 struct PrecomputedProtein
-    ca_coords::Matrix{Float32}   # [3, L]
-    z_latent::Matrix{Float32}    # [latent_dim, L]
-    mask::Vector{Float32}        # [L]
+    ca_coords::Matrix{Float32}     # [3, L]
+    z_mean::Matrix{Float32}        # [latent_dim, L]
+    z_log_scale::Matrix{Float32}   # [latent_dim, L]
+    mask::Vector{Float32}          # [L]
 end
 
 """
@@ -53,11 +57,13 @@ function precompute_single_protein(encoder_cpu::EncoderTransformer,
         )
 
         enc_result = encode_from_features_gpu(encoder_gpu, features_gpu)
-        z_latent = cpu(enc_result[:z_latent][:, :, 1])  # [latent_dim, L]
+        z_mean = cpu(enc_result[:mean][:, :, 1])  # [latent_dim, L]
+        z_log_scale = cpu(enc_result[:log_scale][:, :, 1])  # [latent_dim, L]
 
         return PrecomputedProtein(
             Float32.(ca_coords_centered),
-            Float32.(z_latent),
+            Float32.(z_mean),
+            Float32.(z_log_scale),
             Float32.(data[:residue_mask])
         )
     catch e
@@ -285,6 +291,9 @@ Create flow matching batch from precomputed proteins.
 Uses the schedule transforms defined in the RDNFlow processes P[1] (CA) and P[2] (latents).
 The schedule is now baked into Flowfusion's RDNFlow, ensuring consistency with inference.
 
+Samples z_latent from the stored mean and log_scale using reparameterization trick,
+matching Python training behavior.
+
 Returns named tuple with all tensors on GPU.
 """
 function batch_from_precomputed(proteins::Vector,
@@ -292,18 +301,23 @@ function batch_from_precomputed(proteins::Vector,
     samples = [proteins[i] for i in indices]
     min_len = minimum(length(s.mask) for s in samples)
     B = length(samples)
-    latent_dim = size(samples[1].z_latent, 1)
+    latent_dim = size(samples[1].z_mean, 1)
 
     # Stack and truncate
     x1_ca = zeros(Float32, 3, min_len, B)
-    x1_ll = zeros(Float32, latent_dim, min_len, B)
+    z_mean = zeros(Float32, latent_dim, min_len, B)
+    z_log_scale = zeros(Float32, latent_dim, min_len, B)
     mask = zeros(Float32, min_len, B)
 
     for (b, s) in enumerate(samples)
         x1_ca[:, :, b] = s.ca_coords[:, 1:min_len]
-        x1_ll[:, :, b] = s.z_latent[:, 1:min_len]
+        z_mean[:, :, b] = s.z_mean[:, 1:min_len]
+        z_log_scale[:, :, b] = s.z_log_scale[:, 1:min_len]
         mask[:, b] = s.mask[1:min_len]
     end
+
+    # Sample z_latent using reparameterization trick (matches Python training)
+    x1_ll = z_mean .+ randn(Float32, size(z_mean)) .* exp.(z_log_scale)
 
     # Move to GPU
     x1_ca_gpu = gpu(x1_ca)

@@ -126,9 +126,10 @@ function encode_from_features_gpu(encoder::EncoderTransformer, features::Encoder
     # Split into mean and log_scale
     latent_dim = size(latent_out, 1) ÷ 2
     mean_out = latent_out[1:latent_dim, :, :]
+    log_scale_out = latent_out[latent_dim+1:end, :, :]
 
-    # Return mean (deterministic for training stability)
-    return Dict(:mean => mean_out, :z_latent => mean_out)
+    # Return mean and log_scale (sampling done at training time)
+    return Dict(:mean => mean_out, :log_scale => log_scale_out)
 end
 
 """
@@ -276,10 +277,12 @@ end
 
 Pre-computed encoder outputs for a single protein.
 All tensors are on CPU for storage efficiency.
+Stores mean and log_scale for sampling z at training time.
 """
 struct PrecomputedSample
     ca_coords::Array{Float32, 2}    # [3, L] centered CA coordinates
-    z_latent::Array{Float32, 2}     # [latent_dim, L] encoder mean output
+    z_mean::Array{Float32, 2}       # [latent_dim, L] encoder mean
+    z_log_scale::Array{Float32, 2}  # [latent_dim, L] encoder log_scale
     mask::Vector{Float32}           # [L] residue mask
 end
 
@@ -330,12 +333,14 @@ function precompute_encoder_outputs(encoder_cpu::EncoderTransformer,
         )
 
         enc_result = encode_from_features_gpu(encoder_gpu, features_gpu)
-        z_latent = cpu(enc_result[:z_latent][:, :, 1])  # [latent_dim, L]
+        z_mean = cpu(enc_result[:mean][:, :, 1])  # [latent_dim, L]
+        z_log_scale = cpu(enc_result[:log_scale][:, :, 1])  # [latent_dim, L]
 
         # Store result
         push!(results, PrecomputedSample(
             ca_coords_centered[:, :],
-            z_latent,
+            z_mean,
+            z_log_scale,
             Float32.(data[:residue_mask])
         ))
 
@@ -375,14 +380,19 @@ function flow_matching_batch_from_precomputed(precomputed::Vector{PrecomputedSam
 
     # Stack and truncate to min_len
     x1_ca = zeros(Float32, 3, min_len, B)
-    x1_ll = zeros(Float32, size(samples[1].z_latent, 1), min_len, B)
+    z_mean = zeros(Float32, size(samples[1].z_mean, 1), min_len, B)
+    z_log_scale = zeros(Float32, size(samples[1].z_mean, 1), min_len, B)
     mask = zeros(Float32, min_len, B)
 
     for (b, s) in enumerate(samples)
         x1_ca[:, :, b] = s.ca_coords[:, 1:min_len]
-        x1_ll[:, :, b] = s.z_latent[:, 1:min_len]
+        z_mean[:, :, b] = s.z_mean[:, 1:min_len]
+        z_log_scale[:, :, b] = s.z_log_scale[:, 1:min_len]
         mask[:, b] = s.mask[1:min_len]
     end
+
+    # Sample z_latent using reparameterization trick (matches Python training)
+    x1_ll = z_mean .+ randn(Float32, size(z_mean)) .* exp.(z_log_scale)
 
     # Move to GPU
     x1_ca_gpu = gpu(x1_ca)
