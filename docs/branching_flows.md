@@ -93,14 +93,26 @@ del_loss = floss(P.deletion_policy, del_pred, del_target, mask, indel_scale)
 
 ### Loss Weighting
 
-In Stage 1 (frozen base), weight state loss down to focus on learning split/del:
+Scale state loss to match split/del magnitude (~1):
 ```julia
-total = ca_loss * 0.1 + ll_loss * 0.1 + split_loss + del_loss
+state_loss_scale = 0.01f0  # State loss ~70, split/del ~1
+total = (ca_loss + ll_loss) * state_loss_scale + split_loss + del_loss
 ```
 
-In Stage 2 (full fine-tune), use equal weighting:
+### Learning Rate Schedule
+
+Use linear warmdown over the last N batches (following BranchChain pattern):
+
 ```julia
-total = ca_loss + ll_loss + split_loss + del_loss
+warmdown_batches = 1000  # Or 20% of total batches
+warmdown_start = n_batches - warmdown_batches
+
+# In training loop:
+if batch_idx >= warmdown_start
+    progress = (batch_idx - warmdown_start) / warmdown_batches
+    current_lr = lr * (1.0 - progress) + 1e-8 * progress
+    Flux.adjust!(opt_state, current_lr)
+end
 ```
 
 ## Parallel Data Loading
@@ -170,6 +182,8 @@ GPU utilization improves significantly as batch preparation happens concurrently
 
 ## Generation
 
+### Programmatic API
+
 Use `generate_with_branching` for inference:
 
 ```julia
@@ -189,6 +203,26 @@ result = generate_with_branching(
 # - result.final_length: Final sequence length
 # - result.trajectory_lengths: Length at each step
 ```
+
+### Sampling Script
+
+Use `scripts/sample_branching.jl` for standalone sampling:
+
+```bash
+# Sample with Poisson(100) initial length
+N_SAMPLES=1 N_STEPS=100 julia scripts/sample_branching.jl
+
+# Environment variables:
+# - WEIGHTS_DIR: Directory with trained weights
+# - N_SAMPLES: Number of samples to generate
+# - X0_MEAN_LENGTH: Mean of Poisson distribution for initial length
+# - N_STEPS: Number of integration steps
+```
+
+Example output (5k batch trained model):
+- Initial length: 105 (from Poisson(100))
+- Final length: 369 (grew via splits)
+- Generation time: ~36s for 100 steps
 
 ## Dependencies
 
