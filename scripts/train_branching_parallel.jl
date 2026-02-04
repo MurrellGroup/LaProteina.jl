@@ -292,58 +292,40 @@ println("Batch size: $batch_size, N batches: $n_batches")
 
 t_train_start = time()
 
-for (batch_idx, bd) in enumerate(dataloader)
+for (batch_idx, bd_cpu) in enumerate(dataloader)
     t_batch = time()
 
-    # With batchsize=-1, bd is the direct result from getindex (our prepared batch)
-
-    # Move to GPU
-    raw_features_gpu = ScoreNetworkRawFeatures(
-        dev(bd.raw_features.seq_raw),
-        dev(bd.raw_features.cond_raw),
-        dev(bd.raw_features.pair_raw),
-        dev(bd.raw_features.pair_cond_raw),
-        dev(bd.raw_features.mask)
-    )
-
-    xt_ca = dev(bd.xt_ca)
-    xt_ll = dev(bd.xt_ll)
-    mask = dev(bd.mask)
-    combined_mask = dev(bd.combined_mask)
-    x1_ca_target = dev(bd.x1_ca_target)
-    x1_ll_target = dev(bd.x1_ll_target)
-    split_target = dev(bd.split_target)
-    del_target = dev(bd.del_target)
-    t_vec = dev(bd.t_vec)
+    # Transfer entire batch to GPU at once
+    bd = dev(bd_cpu)
 
     # Compute loss and gradients
     loss, grads = Flux.withgradient(model) do m
-        out = forward_branching_from_raw_features(m, raw_features_gpu)
+        out = forward_branching_from_raw_features(m, bd.raw_features)
 
         # Get x1 predictions from velocity
         v_ca = out[:bb_ca][:v]
         v_ll = out[:local_latents][:v]
-        t_exp = reshape(t_vec, 1, 1, :)
-        x1_ca = xt_ca .+ (1f0 .- t_exp) .* v_ca
-        x1_ll = xt_ll .+ (1f0 .- t_exp) .* v_ll
+        t_exp = reshape(bd.t_vec, 1, 1, :)
+        x1_ca = bd.xt_ca .+ (1f0 .- t_exp) .* v_ca
+        x1_ll = bd.xt_ll .+ (1f0 .- t_exp) .* v_ll
 
         # Time scaling
-        t_scale = 1f0 ./ max.(1f0 .- t_vec, 1f-5).^2
+        t_scale = 1f0 ./ max.(1f0 .- bd.t_vec, 1f-5).^2
 
         # CA loss
-        ca_diff = (x1_ca .- x1_ca_target).^2
-        ca_loss = sum(ca_diff .* reshape(mask, 1, size(mask)...) .* reshape(t_scale, 1, 1, :)) / sum(mask)
+        ca_diff = (x1_ca .- bd.x1_ca_target).^2
+        ca_loss = sum(ca_diff .* reshape(bd.mask, 1, size(bd.mask)...) .* reshape(t_scale, 1, 1, :)) / sum(bd.mask)
 
         # Latent loss
-        ll_diff = (x1_ll .- x1_ll_target).^2
-        ll_loss = sum(ll_diff .* reshape(mask, 1, size(mask)...) .* reshape(t_scale, 1, 1, :)) / sum(mask)
+        ll_diff = (x1_ll .- bd.x1_ll_target).^2
+        ll_loss = sum(ll_diff .* reshape(bd.mask, 1, size(bd.mask)...) .* reshape(t_scale, 1, 1, :)) / sum(bd.mask)
 
         # Split loss (Bregman Poisson)
         mu = exp.(out[:split])
-        split_l = sum((mu .- split_target .* out[:split]) .* combined_mask .* reshape(t_scale, 1, :)) / max(sum(combined_mask), 1f0)
+        split_l = sum((mu .- bd.split_target .* out[:split]) .* bd.combined_mask .* reshape(t_scale, 1, :)) / max(sum(bd.combined_mask), 1f0)
 
         # Del loss (BCE)
-        del_l = sum(((1f0 .- del_target) .* out[:del] .+ log1p.(exp.(-out[:del]))) .* combined_mask .* reshape(t_scale, 1, :)) / max(sum(combined_mask), 1f0)
+        del_l = sum(((1f0 .- bd.del_target) .* out[:del] .+ log1p.(exp.(-out[:del]))) .* bd.combined_mask .* reshape(t_scale, 1, :)) / max(sum(bd.combined_mask), 1f0)
 
         # Total (weight split/del more in stage 1)
         if stage == 1
