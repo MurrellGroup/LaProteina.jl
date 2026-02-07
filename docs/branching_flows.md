@@ -1,254 +1,338 @@
-# Branching Flows Integration for LaProteina
+# Branching Flows for Variable-Length Protein Generation
 
-This document describes the integration of Branching Flows into LaProteina for variable-length protein generation.
+This document describes how Branching Flows is integrated into LaProteina for variable-length protein generation. For the general theory, see the [BranchingFlows.jl](https://github.com/MurrellGroup/BranchingFlows.jl) package.
 
 ## Overview
 
-Branching Flows extends the standard flow matching framework to handle variable-length sequences. Instead of generating a fixed-length protein, the model learns to predict:
-1. **State predictions** (CA coordinates + local latents) - same as standard flow matching
-2. **Split predictions** - expected number of future splits per position
-3. **Deletion predictions** - probability of deletion per position
+Standard flow matching generates fixed-length sequences: you specify L=100 and get exactly 100 residues. Branching Flows extends this to variable-length generation by allowing residues to **split** (creating new positions) or be **deleted** during the generative flow. The model learns when and where these events should occur.
 
-During generation, residues can split (creating new residues) or be deleted, allowing the model to generate proteins of varying lengths from a single initial state.
+### What the Model Predicts
+
+At each timestep, the BranchingScoreNetwork predicts four things:
+
+1. **CA velocity** (`v_ca`): velocity field for alpha-carbon coordinates (same as base model)
+2. **Latent velocity** (`v_ll`): velocity field for local latent vectors (same as base model)
+3. **Split logits** (`split`): log expected number of future splits per position (Poisson rate)
+4. **Deletion logits** (`del`): deletion probability per position (logistic)
+
+The base model handles (1) and (2); branching adds (3) and (4) via two small MLP heads.
+
+### How Generation Works
+
+Starting from noise at t=0, the CoalescentFlow process steps forward in time:
+
+1. The model predicts X1 targets and split/del logits
+2. The RDNFlow processes interpolate CA coords and latents toward predicted X1
+3. The CoalescentFlow samples splits from the predicted Poisson rates
+4. The CoalescentFlow samples deletions from the predicted deletion hazard
+5. New positions inherit their parent's state; deleted positions are removed
+6. The sequence length changes dynamically
+
+By t=1, the flow has converged to a valid protein of variable length.
 
 ## Architecture
 
 ### BranchingScoreNetwork
 
-Wraps the base `ScoreNetwork` with additional heads:
+Wraps the base ScoreNetwork with additional heads:
 
 ```julia
 struct BranchingScoreNetwork
-    base::ScoreNetwork           # Pretrained flow matching model
-    indel_time_proj::Dense       # Time conditioning for indel heads
+    base::ScoreNetwork           # Pretrained 14-layer transformer (160M params)
+    indel_time_proj::Dense       # Time conditioning for indel heads (dim_cond -> token_dim)
     split_head::Chain            # Predicts log expected splits [L, B]
     del_head::Chain              # Predicts deletion logits [L, B]
 end
 ```
 
-The split/del heads are initialized with scaled-down weights (0.05x) for stable training.
+The split/del heads share the same transformer features as the base model. After the final transformer layer, the token embedding is combined with a time-conditioned signal and fed through each head:
+
+```
+indel_cond = indel_time_proj(time_embedding)    # [token_dim, 1, B]
+split_logits = split_head(seqs .+ indel_cond)   # [1, L, B] -> squeeze -> [L, B]
+del_logits = del_head(seqs .+ indel_cond)       # [1, L, B] -> squeeze -> [L, B]
+```
+
+Heads are initialized with 0.05x weight scaling for stable training from a pretrained base.
 
 ### Key Files
 
-- `src/branching/branching_score_network.jl` - BranchingScoreNetwork definition
-- `src/branching/branching_inference.jl` - Generation pipeline
-- `src/branching/branching_training.jl` - Training utilities
-- `scripts/train_branching_parallel.jl` - Training script with parallel data loading
+| File | Purpose |
+|------|---------|
+| `src/branching/branching_score_network.jl` | BranchingScoreNetwork struct and forward pass |
+| `src/branching/branching_inference.jl` | BranchingScoreNetworkWrapper, create_branching_processes, generate_with_branching |
+| `src/branching/branching_training.jl` | softclamp, loss utilities |
+| `src/branching/branching_states.jl` | proteins_to_X1_states, X0_sampler_laproteina |
+| `scripts/train_branching_full.jl` | Training script (the one that works) |
+| `test/test_branching_full_sampling.jl` | Sampling from fine-tuned model with cosine steps |
+
+### Process Setup
+
+The branching flow wraps the base RDNFlow processes in a CoalescentFlow:
+
+```julia
+# Base processes (same as standard la-proteina)
+P_ca = RDNFlow(3; zero_com=false, schedule=:log, schedule_param=2.0,
+               sde_gt_mode=Symbol("1/t"), sde_gt_param=1.0,
+               sc_scale_noise=0.1, sc_scale_score=1.0, t_lim_ode=0.98)
+
+P_ll = RDNFlow(8; zero_com=false, schedule=:power, schedule_param=2.0,
+               sde_gt_mode=:tan, sde_gt_param=1.0,
+               sc_scale_noise=0.1, sc_scale_score=1.0, t_lim_ode=0.98)
+
+# Index tracking process (NullProcess — doesn't evolve, just tracks position origins)
+P_idx = NullProcess()
+
+# Wrap in CoalescentFlow with Beta(1, 2) branch time distribution
+P = CoalescentFlow((P_ca, P_ll, P_idx), Beta(1.0, 2.0))
+```
+
+The `create_branching_processes()` function in `branching_inference.jl` creates this setup with all defaults.
+
+### Branch Time Distribution: Beta(1, 2)
+
+The branch time distribution controls when splitting/deletion events are likely to occur. We use `Beta(1, 2)` which:
+- Has mode at 0 (events more likely early in the flow)
+- Has mean at 1/3
+- Matches the convention used in [BranchChain.jl](https://github.com/MurrellGroup/BranchChain.jl)
+
+This means most branching events happen early, when the state is still noisy and structural changes are less disruptive.
+
+### Self-Conditioning with Variable Length
+
+Self-conditioning in branching flows is more complex than in fixed-length generation because the sequence length changes at each step. The `BranchingScoreNetworkWrapper` handles this using an **index tracking state**:
+
+1. A `NullProcess` (3rd component) carries integer indices `[1, 2, 3, ..., L]`
+2. When position `i` splits, both children get index `i`
+3. When position `j` is deleted, its index disappears
+4. At the next step, the wrapper uses these indices to expand/contract the previous self-conditioning predictions to match the new length
+
+```
+# Before: sc_ca has shape [3, L_old, B], indices were [1, 2, 3, 4]
+# After split at position 2: indices become [1, 2, 2, 3, 4], L_new = 5
+# Expansion: sc_ca_new[:, i, :] = sc_ca_old[:, indices[i], :]
+# After deletion at position 3: indices become [1, 2, 4], L_new = 3
+```
+
+After using the indices for expansion, the wrapper resets them to `[1, 2, ..., L_new]` for the next step.
+
+### Schedule Transform Handling
+
+The model was trained with per-modality schedule transforms: the CA modality sees `tau_ca = log_schedule(s)` and the latent modality sees `tau_ll = power_schedule(s)`, where `s` is the raw uniform time. The wrapper applies these transforms before conditioning the model:
+
+```julia
+# Raw uniform progress s ∈ [0, 1]
+t_ca = schedule_transform(P_ca, s)   # Log schedule: fast early interpolation
+t_ll = schedule_transform(P_ll, s)   # Power schedule: slow early, fast late
+
+# Model receives different times per modality
+batch[:t] = Dict(:bb_ca => [t_ca], :local_latents => [t_ll])
+```
+
+This is critical — passing raw `s` to the model produces broken samples because the model was trained on schedule-transformed times.
 
 ## Training
 
-### Two-Stage Training
+### Training Script
 
-1. **Stage 1**: Freeze base ScoreNetwork, train only split/del heads
-2. **Stage 2**: Unfreeze and fine-tune entire model with lower learning rate
-
-### Data Preparation with `branching_bridge`
-
-Training data is prepared using `branching_bridge` from BranchingFlows.jl:
-
-```julia
-batch = branching_bridge(
-    P,                              # CoalescentFlow process
-    X0_sampler,                     # Samples initial noise states
-    X1s,                            # Target protein states (BranchingState)
-    t_dist;                         # Time distribution (Uniform(0, 1))
-    coalescence_factor = 1.0,       # Controls coalescence rate
-    use_branching_time_prob = 0.5,  # Probability of sampling at branch times
-    length_mins = Poisson(100),     # X0 length distribution
-    deletion_pad = 1.1              # Padding factor for length changes
-)
-```
-
-Parameters should match BranchChain.jl for consistency.
-
-### Losses
-
-Three loss components:
-
-#### 1. State Loss (CA + Latents)
-Standard flow matching MSE loss with time scaling:
-
-```julia
-t_scale = 1f0 ./ max.(1f0 .- t, 0.1f0).^2  # eps = 0.1
-```
-
-**Important**: Use eps=0.1, not smaller values like 1e-5 which cause loss spikes near t=1.
-
-#### 2. Split Loss (Bregman Poisson)
-Uses `floss` from Flowfusion with CoalescentFlow:
-
-```julia
-indel_scale = scalefloss(P, t, 1, 0.2f0)  # eps = 0.2
-split_loss = floss(P, split_pred, split_target, mask, indel_scale)
-```
-
-#### 3. Deletion Loss (BCE)
-Uses `floss` from Flowfusion with Deletion policy:
-
-```julia
-del_loss = floss(P.deletion_policy, del_pred, del_target, mask, indel_scale)
-```
-
-**Important**: Always use `floss` from Flowfusion rather than rolling your own loss functions - they handle the Bregman divergence and numerical stability correctly.
-
-### Loss Weighting
-
-Scale state loss to match split/del magnitude (~1):
-```julia
-state_loss_scale = 0.01f0  # State loss ~70, split/del ~1
-total = (ca_loss + ll_loss) * state_loss_scale + split_loss + del_loss
-```
-
-### Learning Rate Schedule
-
-Use linear warmdown over the last N batches (following BranchChain pattern):
-
-```julia
-warmdown_batches = 1000  # Or 20% of total batches
-warmdown_start = n_batches - warmdown_batches
-
-# In training loop:
-if batch_idx >= warmdown_start
-    progress = (batch_idx - warmdown_start) / warmdown_batches
-    current_lr = lr * (1.0 - progress) + 1e-8 * progress
-    Flux.adjust!(opt_state, current_lr)
-end
-```
-
-## Parallel Data Loading
-
-### The Problem
-
-`branching_bridge` and `extract_raw_features` are CPU-intensive. Running them synchronously in the training loop leaves the GPU idle.
-
-### The Solution
-
-Following the pattern from BranchChain.jl, we use Flux's DataLoader with parallel workers:
-
-```julia
-# BatchDataset prepares full batches in getindex
-struct BatchDataset
-    batch_indices::Vector{Vector{Int}}
-    proteins::Vector
-    process::CoalescentFlow
-    base_model::ScoreNetwork
-end
-
-Base.getindex(x::BatchDataset, i) = prepare_training_batch(
-    x.batch_indices[i], x.proteins, x.process, X0_sampler, x.base_model
-)
-
-# Create dataloader with parallel=true, batchsize=-1
-dataset = BatchDataset(batch_indices, proteins, P, cpu(model.base))
-dataloader = Flux.DataLoader(dataset; batchsize=-1, parallel=true)
-```
-
-Key points:
-- `batchsize=-1`: Each `getindex` returns a complete batch, no further batching
-- `parallel=true`: Prepare next batch in background while GPU trains on current
-- Run Julia with multiple threads: `julia -t 8 script.jl`
-
-### GPU Transfer
-
-Transfer the entire batch struct to GPU at once in the training loop:
-
-```julia
-for (batch_idx, bd_cpu) in enumerate(dataloader)
-    bd = dev(bd_cpu)  # Single transfer of entire NamedTuple
-    # ... training ...
-end
-```
-
-**Don't** call `dev()` on each field individually - transfer the whole struct.
-
-### Memory Management
-
-Required override for proper GPU memory cleanup with DataLoader:
-
-```julia
-Flux.MLDataDevices.Internal.unsafe_free!(x) = (
-    Flux.fmapstructure(Flux.MLDataDevices.Internal.unsafe_free_internal!, x);
-    return nothing
-)
-```
-
-### Performance
-
-With 8 threads and batch size 4:
-- Without parallel loading: ~1026 ms/batch
-- With parallel loading: ~896 ms/batch (~13% speedup)
-
-GPU utilization improves significantly as batch preparation happens concurrently.
-
-## Generation
-
-### Programmatic API
-
-Use `generate_with_branching` for inference:
-
-```julia
-result = generate_with_branching(
-    model,
-    initial_length;           # Starting sequence length
-    nsteps = 400,             # Integration steps
-    latent_dim = 8,
-    self_cond = true,         # Self-conditioning
-    schedule = :log,          # Time schedule (:log or :linear)
-    verbose = true
-)
-
-# Returns:
-# - result.ca_coords: [3, L_final] CA coordinates
-# - result.latents: [latent_dim, L_final] local latents
-# - result.final_length: Final sequence length
-# - result.trajectory_lengths: Length at each step
-```
-
-### Sampling Script
-
-Use `scripts/sample_branching.jl` for standalone sampling:
+The working training script is `scripts/train_branching_full.jl`. Run with:
 
 ```bash
-# Sample with Poisson(100) initial length
-N_SAMPLES=1 N_STEPS=100 julia scripts/sample_branching.jl
-
-# Environment variables:
-# - WEIGHTS_DIR: Directory with trained weights
-# - N_SAMPLES: Number of samples to generate
-# - X0_MEAN_LENGTH: Mean of Poisson distribution for initial length
-# - N_STEPS: Number of integration steps
+julia -t 8 scripts/train_branching_full.jl
 ```
 
-The script:
-1. Generates CA coords + latents using branching flows
-2. Runs the decoder to get all-atom coordinates
-3. Saves PDB file with full atomic detail
-4. Saves JLD2 with all data for further analysis
+Key hyperparameters (current working values):
 
-Example output (5k batch trained model):
-- Initial length: 87 (from Poisson(100))
-- Final length: 104 (grew via splits)
-- Generation time: ~35s flow + ~8s decoder = ~43s total
-- Output: `sample_1_1.pdb` with all-atom coordinates
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Learning rate | 2.5e-4 | With Adam optimizer |
+| Batch size | 4 | Proteins per batch |
+| Total iterations | 20,000 | ~10 hours on A100 |
+| Warmdown | Last 2,000 iters | Linear decay to 1e-9 |
+| CA loss scale | 2.0 | Upweights CA loss |
+| LL loss scale | 0.1 | Downweights latent loss |
+| Softclamp threshold | 3.5 | Per-component loss clamp |
+| Softclamp hardcap | 5.0 | Maximum per-component loss |
+| Total loss hardcap | 20.0 | Maximum total loss |
+| deletion_pad | 1.1 | 10% extra deletion positions |
+| X0 mean length | 100 | Mean of Poisson for initial noise length |
+
+### Data Preparation
+
+Training uses `branching_bridge` from BranchingFlows.jl to create training samples:
+
+```julia
+bat = branching_bridge(P, X0_sampler, X1s, t_dist;
+    coalescence_factor = 1.0,
+    use_branching_time_prob = 0.5,
+    merger = BranchingFlows.canonical_anchor_merge,
+    length_mins = Poisson(100),
+    deletion_pad = 1.1
+)
+```
+
+This function:
+1. Takes target protein structures (`X1s`) as BranchingStates
+2. Samples coalescent forest structures connecting X0 noise to X1 targets
+3. Samples a random time `t` and computes the bridged state `Xt`
+4. Returns `Xt`, X1 targets, split targets, and deletion targets
+
+### Loss Functions
+
+Four loss components, each independently softclamped:
+
+#### 1. CA Loss (flow matching MSE)
+```julia
+# v-parameterization: predict velocity, convert to x1
+x1_ca_pred = xt_ca + (1 - t_ca) * v_ca_pred
+ca_loss = scaledmaskedmean((x1_ca_pred - x1_ca_target)^2, 1/(1-t_ca)^2, mask)
+```
+
+#### 2. Latent Loss (flow matching MSE)
+Same as CA but with latent schedule: `1/(1-t_ll)^2` scaling.
+
+#### 3. Split Loss (Bregman Poisson)
+Uses `floss` from Flowfusion with CoalescentFlow:
+```julia
+indel_scale = scalefloss(P, t_raw, 1, 0.2f0)  # 1/(1.2 - t) scaling
+split_loss = floss(P, split_pred, split_target, combined_mask, indel_scale)
+```
+The split target is the expected number of future splits (from the coalescent tree). The loss is Bregman Poisson divergence: `exp(pred) - target * pred`.
+
+#### 4. Deletion Loss (logistic BCE)
+Uses `floss` from Flowfusion with the deletion policy:
+```julia
+del_loss = floss(P.deletion_policy, del_pred, del_target, combined_mask, indel_scale)
+```
+The deletion target is binary (1 = this position will be deleted). The loss is standard binary cross-entropy on logits.
+
+#### Softclamp
+All loss components pass through a softclamp that transitions to log growth above a threshold:
+```julia
+function softclamp(loss; threshold=3.5, hardcap=5.0)
+    if loss > threshold
+        return min(threshold + log(loss - threshold + 1), hardcap)
+    else
+        return loss
+    end
+end
+```
+
+### Warmdown Schedule
+
+The learning rate decays linearly over the last 2000 iterations. Because the LR is only updated every 10 batches, the warmdown schedule must account for this:
+
+```julia
+# warmdown_batches = 2000, but next_rate() called every 10 batches
+# So create schedule with 200 steps (not 2000)
+sched = linear_decay_schedule(current_lr, 1e-9, warmdown_batches / 10)
+```
+
+### Parallel Data Loading
+
+CPU-intensive work (`branching_bridge` + `extract_raw_features`) runs in a background thread while the GPU trains:
+
+```julia
+dataset = BatchDataset(batch_indices, proteins, P, cpu(model.base))
+dataloader = Flux.DataLoader(dataset; batchsize=-1, parallel=true)
+
+for (batch_idx, bd_cpu) in enumerate(dataloader)
+    bd = dev(bd_cpu)  # Transfer entire batch to GPU
+    # ... training step ...
+end
+```
+
+Run Julia with multiple threads (`julia -t 8`) for this to work.
+
+## Generation / Inference
+
+### Quick Generation
+
+```julia
+result = generate_with_branching(model, 100;
+    nsteps=400, latent_dim=8, self_cond=true, dev=gpu, verbose=true)
+# Returns: (ca_coords, latents, final_length, trajectory_lengths)
+```
+
+### Cosine Time Steps (Better Quality)
+
+For higher quality, use cosine-spaced time steps with more steps:
+
+```julia
+step_func(t) = Float32(1 - (cos(t * pi) + 1) / 2)
+step_number = 500
+steps = step_func.(0f0:Float32(1/step_number):1f0)
+```
+
+This gives denser steps near t=0 and t=1 where the flow changes most rapidly.
+
+See `test/test_branching_full_sampling.jl` for a complete example.
+
+### Sampling Results
+
+With the fine-tuned model (20k iterations, Beta(1,2), ca_scale=2.0):
+- Starting from Poisson(100) initial lengths
+- Final lengths: 113-173 residues (healthy growth via splits)
+- Mean CA-CA distances: 0.372-0.381 nm (excellent, expected ~0.38 nm)
+- Generation time: ~2 minutes per sample (500 cosine steps on GPU)
+
+### Full Pipeline
+
+```julia
+# 1. Generate CA coords + latents
+result = generate_with_branching(model, initial_length; ...)
+
+# 2. Decode to all-atom structure
+dec_input = Dict(
+    :z_latent => reshape(result.latents, 8, L, 1),
+    :ca_coors => reshape(result.ca_coords, 3, L, 1),
+    :mask => ones(Float32, L, 1)
+)
+dec_out = decoder(dec_input)
+
+# 3. Save PDB
+samples = Dict(
+    :ca_coords => ..., :latents => ...,
+    :all_atom_coords => dec_out[:coors],
+    :aatype => dec_out[:aatype_max],
+    :atom_mask => dec_out[:atom_mask],
+    :mask => ...
+)
+samples_to_pdb(samples, output_dir; prefix="sample", save_all_atom=true)
+```
+
+## Lessons Learned
+
+### Critical Parameter Choices
+
+1. **Beta(1, 2) for branch times** — not Beta(2, 2). The asymmetric distribution pushes branching events earlier in the flow, matching the convention from BranchChain.jl. With Beta(2, 2), the model severely over-deleted.
+
+2. **Softclamp at 3.5** — not 2.0. With threshold=2.0, the CA loss (scaled at 2x) was hitting the clamp too often, preventing the model from learning CA structure properly.
+
+3. **CA loss scale = 2.0** — the raw CA loss is small relative to other components. Without upweighting, the model underprioritizes CA coordinate accuracy.
+
+4. **Warmdown matters** — a proper linear warmdown from 2.5e-4 to 1e-9 over the last 2000 iterations significantly improves final sample quality.
+
+5. **Per-modality schedule transforms** — the model must receive `tau_ca = log_schedule(s)` and `tau_ll = power_schedule(s)` for conditioning, not raw uniform `s`. The wrapper handles this, but getting it wrong produces broken samples.
+
+6. **zero_com=false for branching** — CA coordinates use `zero_com=false` in the branching setting (unlike the base model which uses `zero_com=true`). This avoids issues with single-position bridges that can zero out coordinates.
+
+### Common Issues
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| Samples over-delete (L shrinks) | Wrong Beta distribution | Use Beta(1, 2) |
+| Loss doesn't decrease at end | Warmdown not working | Account for LR update interval |
+| CA-CA distances wrong (~0.5 nm) | Raw time conditioning | Apply schedule_transform per modality |
+| Loss spikes | Softclamp too tight | Increase threshold to 3.5 |
+| Training diverges | No loss clamping | Use softclamp + total hardcap |
+| Self-conditioning breaks after splits | Length mismatch | Use index tracking state |
 
 ## Dependencies
 
-- `BranchingFlows.jl` - Branching Flows framework
-- `Flowfusion.jl` - Flow matching utilities, `floss`, `scalefloss`
-- `ForwardBackward.jl` - State representations
-
-## Common Issues
-
-### Loss Spikes
-- Check eps values: state loss should use eps=0.1, indel losses use eps=0.2
-- Use `floss` from Flowfusion, not custom loss implementations
-
-### OOM Errors
-- Reduce batch size
-- Don't wrap DataLoader with `dev()` (keeps two batches on GPU)
-- Transfer batches inside loop with `bd = dev(bd_cpu)`
-
-### Slow Training
-- Ensure Julia is running with multiple threads (`-t 8`)
-- Verify `parallel=true` in DataLoader
-- Check that `branching_bridge` and `extract_raw_features` happen in `prepare_training_batch`
+| Package | Purpose |
+|---------|---------|
+| BranchingFlows.jl | CoalescentFlow, branching_bridge, BranchingState |
+| Flowfusion.jl (rdn-flow) | RDNFlow, gen(), step(), floss(), scalefloss() |
+| ForwardBackward.jl | ContinuousState, DiscreteState, tensor() |
+| Distributions.jl | Beta, Poisson, Uniform for sampling |

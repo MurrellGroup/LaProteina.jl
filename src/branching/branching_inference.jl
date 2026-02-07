@@ -190,7 +190,7 @@ la-proteina defaults.
 # Keyword Arguments
 - `latent_dim`: Dimension of local latents
 - CA and latent schedule/SDE parameters (passed to RDNFlow)
-- Branch time distribution (default: Beta(2, 2))
+- Branch time distribution (default: Beta(1, 2))
 
 # Returns
 CoalescentFlow wrapping (P_ca, P_ll, P_idx)

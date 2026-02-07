@@ -1,6 +1,6 @@
 # LaProteina
 
-Julia port of NVIDIA's [la-proteina](https://github.com/NVIDIA/la-proteina) protein generation model with exact numerical parity to the Python implementation.
+Julia port of NVIDIA's [la-proteina](https://github.com/NVIDIA/la-proteina) protein generation model with exact numerical parity to the Python implementation, extended with [Branching Flows](https://github.com/MurrellGroup/BranchingFlows.jl) for variable-length protein generation.
 
 ## Overview
 
@@ -10,7 +10,92 @@ LaProteina implements flow matching on protein structure space for unconditional
 - **ScoreNetwork**: 14-layer transformer (160M parameters) that predicts velocity fields for flow matching on CA coordinates and local latent representations
 - **VAE Decoder**: 12-layer transformer that decodes latent representations back to all-atom protein structures
 
-The implementation achieves <1e-5 numerical parity with the Python reference and generates valid protein structures with correct CA-CA distances (~3.8Å).
+The implementation achieves <1e-5 numerical parity with the Python reference and generates valid protein structures with correct CA-CA distances (~3.8 Angstrom).
+
+### Branching Flows Extension
+
+The **BranchingScoreNetwork** extends the base ScoreNetwork with split and deletion heads, enabling variable-length protein generation via [Branching Flows](https://github.com/MurrellGroup/BranchingFlows.jl). During generation, residues can split (creating new positions) or be deleted, allowing the model to produce proteins of varying lengths from a single initial noise state.
+
+See [docs/branching_flows.md](docs/branching_flows.md) for full details.
+
+## How It Works
+
+### Flow Matching on Protein Structure
+
+La-proteina generates proteins by learning to reverse a noising process. At t=0 we have pure noise; at t=1 we have a valid protein. The ScoreNetwork predicts the velocity field `v(x, t)` that transports noise to structure:
+
+```
+x_t = (1 - t) * x_0 + t * x_1       # Linear interpolation (bridge)
+v(x_t, t) = x_1 - x_0                # Target velocity
+x_1_hat = x_t + (1 - t) * v_hat      # Predicted endpoint from velocity
+```
+
+The model operates on two modalities simultaneously:
+- **CA coordinates** (`bb_ca`): 3D positions of alpha-carbon atoms, in nanometers
+- **Local latents** (`local_latents`): 8D per-residue latent vectors from the VAE encoder
+
+Each modality has its own schedule transform (see below), but they share the same transformer backbone.
+
+### Schedule Transforms
+
+The flow uses non-uniform time schedules that accelerate interpolation at different rates:
+
+| Component | Schedule | Formula | Effect |
+|-----------|----------|---------|--------|
+| CA coords | Log | `tau(s) = (1 - 10^(-2s)) / (1 - 10^(-2))` | Fast early interpolation; 90% done by s=0.48 |
+| Latents | Power | `tau(s) = s^2` | Slow early, fast late; 90% done by s=0.95 |
+
+The model receives schedule-transformed times `tau(s)` for each modality, while the generation process steps through uniform `s` in [0, 1]. This separation means:
+- The process handles interpolation and noise injection in `tau`-space
+- The model is conditioned on `tau_ca` and `tau_ll` (different per modality)
+- Loss scaling uses `1/(1-tau)^2` per modality
+
+### SDE Sampling
+
+During generation, an SDE adds controlled noise along the trajectory for better sample quality:
+
+```
+dx = [v + g(tau) * score_scale * score] * d_tau + sqrt(2 * g(tau) * noise_scale) * dW
+```
+
+Where `g(tau) = 1/(tau + eps)` for CA and `g(tau) = tan(tau * pi/2)` for latents. The `sc_scale_noise=0.1` parameter controls noise magnitude. Above `t_lim_ode=0.98`, the SDE switches to pure ODE for clean final convergence.
+
+### Self-Conditioning
+
+The model uses self-conditioning: the predicted `x_1` from the previous timestep is fed back as an additional input. This significantly improves generation quality. The self-conditioning features (`x_sc`) are processed through the same feature extraction pipeline as the noisy input.
+
+## Architecture
+
+### ScoreNetwork
+
+The core model is a 14-layer transformer with:
+- **Token dimension**: 768
+- **Pair dimension**: 256 (for pair representation)
+- **Attention heads**: 12
+- **Conditioning dimension**: 256 (for time embedding)
+- **Output parameterization**: v (velocity)
+
+Each transformer layer consists of:
+1. **PairBiasAttention**: Multi-head attention with pair bias (AF3-style), using ProteINAAdaLN (adaptive LayerNorm with sigmoid gating)
+2. **SwiGLU Transition**: Feedforward with SwiGLU activation and adaptive output scaling
+3. Optional **PairUpdate**: Outer product update of pair representation
+
+Input features include:
+- Sequence features: time embedding, position embedding, noisy CA coords, noisy latents, self-conditioning predictions
+- Pair features: pairwise CA distances (binned), relative sequence separation
+
+### DecoderTransformer
+
+The VAE decoder converts latent representations back to all-atom structures:
+- Input: `z_latent` [8, L, B] + `ca_coors` [3, L, B]
+- Output: all-atom coordinates [3, 37, L, B], sequence logits [20, L, B], atom masks [37, L, B]
+
+### EncoderTransformer
+
+The VAE encoder extracts latent representations from all-atom structures:
+- Input: all-atom coordinates + residue types + masks
+- Output: mean [8, L, B] + log_scale [8, L, B]
+- Frozen during flow matching training; outputs are precomputed
 
 ## Training Data
 
@@ -63,11 +148,6 @@ This script:
 ├── train_shard_10.jld2
 ```
 
-**Resume support**: If interrupted, set `START_SHARD` environment variable:
-```bash
-START_SHARD=5 julia scripts/precompute_all_training_data.jl
-```
-
 **Processing time**: ~70 minutes per shard on A100 GPU (~11.5 hours total).
 
 ### Stage 2: Flow Matching Training
@@ -99,10 +179,7 @@ P = (P_ca, P_ll)
 opt_state = Optimisers.setup(Adam(1e-5), score_net_gpu)
 for epoch in 1:num_epochs
     for batch_indices in batches
-        # Create batch with z sampling (reparameterization trick)
         batch = batch_from_precomputed(proteins, batch_indices, P)
-
-        # Compute flow matching loss and gradients
         loss, grads = Flux.withgradient(score_net_gpu) do m
             efficient_flow_loss_gpu(m, batch.xt_ca, batch.xt_ll,
                                     batch.x1_ca, batch.x1_ll,
@@ -113,56 +190,93 @@ for epoch in 1:num_epochs
 end
 ```
 
-### Precomputed Data Format
+## Quick Start: Inference
 
-Each `PrecomputedProtein` contains:
-- `ca_coords::Matrix{Float32}` - [3, L] centered CA coordinates in nanometers
-- `z_mean::Matrix{Float32}` - [8, L] VAE encoder mean output
-- `z_log_scale::Matrix{Float32}` - [8, L] VAE encoder log-scale output
-- `mask::Vector{Float32}` - [L] residue mask (1.0 for valid residues)
+### Fixed-Length Generation (Base Model)
 
-At training time, latents are sampled using the reparameterization trick:
 ```julia
-z = z_mean + randn(size(z_mean)) .* exp.(z_log_scale)
+using LaProteina
+using Flux: gpu
+
+# Load models
+score_net = ScoreNetwork(
+    n_layers=14, token_dim=768, n_heads=12,
+    latent_dim=8, dim_cond=256, pair_dim=256,
+    qk_ln=true, update_pair_repr=false, output_param=:v
+)
+load_score_network_weights!(score_net, "weights/score_network.npz")
+
+decoder = DecoderTransformer(
+    n_layers=12, token_dim=768, n_heads=12,
+    latent_dim=8, dim_cond=128, pair_dim=256,
+    qk_ln=true, update_pair_repr=false
+)
+load_decoder_weights!(decoder, "weights/decoder.npz")
+
+# Generate (see test/test_gpu_sampling.jl for full example)
+samples = sample_with_flowfusion(gpu(score_net), decoder, 100, 1;
+    nsteps=400, self_cond=true, dev=gpu)
+
+# Save to PDB
+samples_to_pdb(samples, "output/"; prefix="generated", save_all_atom=true)
 ```
 
-This matches the Python training behavior and ensures the ScoreNetwork sees the full distribution of encoder outputs.
+### Variable-Length Generation (Branching Flows)
+
+```julia
+using LaProteina
+using BranchingFlows
+using Flux: gpu
+
+# Load BranchingScoreNetwork
+base = ScoreNetwork(n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
+                    dim_cond=256, latent_dim=8, output_param=:v,
+                    qk_ln=true, update_pair_repr=false)
+model = BranchingScoreNetwork(base)
+
+# Load fine-tuned weights
+weights = load("weights/branching_full.jld2")
+Flux.loadmodel!(model.base, weights["base"])
+Flux.loadmodel!(model.indel_time_proj, weights["indel_time_proj"])
+Flux.loadmodel!(model.split_head, weights["split_head"])
+Flux.loadmodel!(model.del_head, weights["del_head"])
+model = gpu(model)
+
+# Generate variable-length protein
+result = generate_with_branching(model, 100;
+    nsteps=400, latent_dim=8, self_cond=true, dev=gpu, verbose=true)
+
+println("Generated protein: $(result.final_length) residues")
+```
+
+See [test/test_branching_full_sampling.jl](test/test_branching_full_sampling.jl) for a complete example with cosine time steps and decoder output.
 
 ## Dependencies
 
-### Required: Flowfusion.jl (rdn-flow branch)
+### Required Packages
 
-This package requires the `rdn-flow` branch of Flowfusion.jl which adds the `RDNFlow` process for flow matching on (R^d)^n:
-
-```julia
-using Pkg
-Pkg.add(url="https://github.com/MurrellGroup/Flowfusion.jl", rev="rdn-flow")
-```
-
-### Other Dependencies
-
-The package also requires (installed automatically):
-- Flux.jl, CUDA.jl - Neural networks and GPU support
-- NNlib.jl - Neural network primitives
-- NPZ.jl - Loading weights from NumPy format
-- JLD2.jl - Saving/loading precomputed data
-- Distributions.jl
+| Package | Branch | Purpose |
+|---------|--------|---------|
+| [Flowfusion.jl](https://github.com/MurrellGroup/Flowfusion.jl) | rdn-flow | RDNFlow process, gen() API |
+| [BranchingFlows.jl](https://github.com/MurrellGroup/BranchingFlows.jl) | - | Variable-length generation |
+| [ForwardBackward.jl](https://github.com/MurrellGroup/ForwardBackward.jl) | - | State representations |
+| Flux.jl | - | Neural networks |
+| CUDA.jl | - | GPU support |
+| NPZ.jl | - | Loading weights from NumPy format |
+| JLD2.jl | - | Saving/loading precomputed data |
 
 ## Weights
 
 You need pretrained weights in the `weights/` directory:
-
-### Required Files
 
 | File | Size | Description |
 |------|------|-------------|
 | `encoder.npz` | ~340 MB | VAE encoder weights |
 | `score_network.npz` | ~634 MB | ScoreNetwork weights |
 | `decoder.npz` | ~512 MB | VAE decoder weights |
+| `branching_full.jld2` | ~650 MB | Fine-tuned BranchingScoreNetwork (optional) |
 
 ### Extracting Weights from Python Checkpoint
-
-If you have the original Python checkpoints:
 
 ```bash
 # Extract ScoreNetwork and Decoder from flow model checkpoint
@@ -176,81 +290,57 @@ python scripts/extract_encoder_weights.py \
     --output weights/encoder.npz
 ```
 
-## Installation
+## File Structure
 
-```julia
-using Pkg
-Pkg.add(url="https://github.com/MurrellGroup/LaProteina.jl")
 ```
-
-## Quick Start: Inference
-
-```julia
-using LaProteina
-
-# Load models
-score_net = ScoreNetwork(
-    n_layers=14, token_dim=768, n_heads=12,
-    latent_dim=8, dim_cond=256, pair_dim=256
-)
-load_score_network_weights!(score_net, "weights/score_network.npz")
-
-decoder = DecoderTransformer(
-    n_layers=12, token_dim=768, n_heads=12,
-    latent_dim=8, dim_cond=128, pair_dim=256
-)
-load_decoder_weights!(decoder, "weights/decoder.npz")
-
-# Generate a 50-residue protein
-L = 50   # sequence length
-B = 3    # batch size (number of samples)
-
-flow_samples = generate_with_flowfusion(score_net, L, B;
-    nsteps=100,
-    self_cond=true,
-    schedule_mode=:power,
-    schedule_p=2.0
-)
-
-# Decode to all-atom structure
-dec_input = Dict(
-    :z_latent => flow_samples[:local_latents],
-    :ca_coors => flow_samples[:bb_ca],
-    :mask => flow_samples[:mask]
-)
-dec_out = decoder(dec_input)
-
-# Save to PDB
-samples = Dict(
-    :ca_coords => flow_samples[:bb_ca],
-    :latents => flow_samples[:local_latents],
-    :all_atom_coords => dec_out[:coors],
-    :aatype => dec_out[:aatype_max],
-    :atom_mask => dec_out[:atom_mask],
-    :mask => flow_samples[:mask]
-)
-samples_to_pdb(samples, "output/"; prefix="generated")
+LaProteina/
+├── src/
+│   ├── LaProteina.jl              # Main module
+│   ├── constants.jl               # Amino acid and atom constants
+│   ├── utils.jl                   # Tensor utilities, PyTorchLayerNorm
+│   ├── inference.jl               # Legacy flow matching sampling
+│   ├── flowfusion_sampling.jl     # Flowfusion gen() API integration
+│   ├── weights.jl                 # Weight loading functions
+│   ├── training.jl                # Training utilities
+│   ├── features/
+│   │   ├── feature_factory.jl     # Feature extraction (29 feature types)
+│   │   ├── time_embedding.jl      # Sinusoidal embeddings
+│   │   ├── pair_features.jl       # Distance/separation features
+│   │   └── geometry.jl            # Dihedral and bond angle calculations
+│   ├── nn/
+│   │   ├── adaptive_ln.jl         # ProteINAAdaLN, AdaptiveOutputScale
+│   │   ├── pair_bias_attention.jl # AF3-style attention with pair bias
+│   │   ├── transition.jl          # SwiGLU transition blocks
+│   │   ├── transformer_block.jl   # Transformer blocks, PairUpdate
+│   │   ├── encoder.jl             # VAE encoder
+│   │   ├── encoder_efficient.jl   # Efficient encoder for precomputation
+│   │   ├── score_network.jl       # ScoreNetwork (main model)
+│   │   ├── score_network_efficient.jl  # GPU-optimized ScoreNetwork
+│   │   └── decoder.jl             # VAE decoder
+│   ├── training/
+│   │   └── precompute_encoder.jl  # Precomputed training data utilities
+│   ├── data/
+│   │   ├── pdb_loading.jl         # PDB/mmCIF file I/O
+│   │   └── transforms.jl          # Data transforms
+│   └── branching/
+│       ├── branching_score_network.jl  # BranchingScoreNetwork
+│       ├── branching_inference.jl      # Generation with branching
+│       ├── branching_training.jl       # Training utilities
+│       └── branching_states.jl         # State conversion utilities
+├── scripts/
+│   ├── train_branching_full.jl    # Branching flows training (full)
+│   ├── plot_training.jl           # Training loss visualization
+│   ├── precompute_all_training_data.jl  # Dataset precomputation
+│   └── extract_weights.py         # Weight extraction from Python
+├── test/
+│   ├── test_gpu_sampling.jl       # Base model sampling test
+│   ├── test_branching_full_sampling.jl  # Branching model sampling
+│   └── ...                        # Parity tests, feature tests, etc.
+├── weights/                       # Place weights here (not in git)
+└── docs/
+    ├── branching_flows.md         # Branching Flows integration guide
+    └── branching_flows_conversion.md  # Conversion reference
 ```
-
-## Flowfusion Integration
-
-This package uses [Flowfusion.jl](https://github.com/MurrellGroup/Flowfusion.jl)'s `gen()` API for flow matching sampling. The integration provides:
-
-- **RDNFlow process**: Flow matching on (R^d)^n for CA coordinates (3D with zero COM) and latent representations (8D)
-- **Schedule transforms**: Log schedule for CA, power schedule for latents
-- **gen() sampling**: Uses Flowfusion's standardized generation interface
-- **Model wrapper**: `MutableScoreNetworkWrapper` adapts the ScoreNetwork to Flowfusion's expected `model(t, Xt) -> X1_hat` signature
-
-### Flow Matching Schedule
-
-The flow uses different schedules for CA coordinates and latents:
-
-| Component | Schedule | Parameter | SDE Mode |
-|-----------|----------|-----------|----------|
-| CA coords | Log | 2.0 | 1/t |
-| Latents | Power | 2.0 | tan |
-
-These schedules are baked into the `RDNFlow` process and must match between training and inference.
 
 ## Architecture Details
 
@@ -262,69 +352,7 @@ Julia uses column-major order, so tensors are transposed from Python:
 
 ### PyTorchLayerNorm
 
-This package uses `PyTorchLayerNorm` which computes `sqrt(var + eps)` instead of Flux's `sqrt(var + eps²)`. This is critical for numerical parity.
-
-### Key Components
-
-| Component | Description |
-|-----------|-------------|
-| `EncoderTransformer` | VAE encoder (frozen during flow training) |
-| `ScoreNetwork` | Flow matching velocity predictor |
-| `DecoderTransformer` | VAE decoder for all-atom coords |
-| `PairBiasAttention` | AF3-style attention with pair bias |
-| `ProteINAAdaLN` | Adaptive LayerNorm with sigmoid gating |
-| `SwiGLUTransition` | SwiGLU feedforward with adaptive scaling |
-| `PrecomputedProtein` | Storage format for precomputed encoder outputs |
-| `batch_from_precomputed` | Create training batches with z sampling |
-| `efficient_flow_loss_gpu` | GPU-optimized flow matching loss |
-
-## File Structure
-
-```
-LaProteina/
-├── src/
-│   ├── LaProteina.jl              # Main module
-│   ├── constants.jl               # Amino acid constants
-│   ├── utils.jl                   # Tensor utilities, PyTorchLayerNorm
-│   ├── inference.jl               # Legacy flow matching sampling
-│   ├── flowfusion_sampling.jl     # Flowfusion gen() API integration
-│   ├── weights.jl                 # Weight loading functions
-│   ├── training.jl                # Training utilities
-│   ├── features/
-│   │   ├── feature_factory.jl     # Feature extraction
-│   │   ├── time_embedding.jl      # Sinusoidal embeddings
-│   │   ├── pair_features.jl       # Distance/separation features
-│   │   └── geometry.jl            # Geometric calculations
-│   ├── nn/
-│   │   ├── adaptive_ln.jl         # ProteINAAdaLN, AdaptiveOutputScale
-│   │   ├── pair_bias_attention.jl # Attention with pair bias
-│   │   ├── transition.jl          # SwiGLU transition
-│   │   ├── transformer_block.jl   # Transformer blocks
-│   │   ├── encoder.jl             # VAE encoder
-│   │   ├── encoder_efficient.jl   # Efficient encoder for precomputation
-│   │   ├── score_network.jl       # ScoreNetwork
-│   │   ├── score_network_efficient.jl  # GPU-optimized ScoreNetwork
-│   │   └── decoder.jl             # VAE decoder
-│   ├── training/
-│   │   └── precompute_encoder.jl  # Precomputed training data utilities
-│   └── data/
-│       ├── pdb_loading.jl         # PDB/mmCIF I/O
-│       └── transforms.jl          # Data transforms
-├── scripts/
-│   ├── extract_weights.py         # Extract weights from checkpoint
-│   ├── extract_encoder_weights.py # Extract encoder weights
-│   ├── precompute_all_training_data.jl  # Full dataset precomputation
-│   └── run_inference.jl           # Example inference script
-├── test/
-│   ├── train_on_shard.jl          # Training test on precomputed data
-│   ├── test_precomputed_training.jl
-│   ├── gpu_utilization_test.jl
-│   └── smol_demo_training_data.jld2  # Small demo dataset
-└── weights/                       # Place weights here (not in git)
-    ├── encoder.npz
-    ├── score_network.npz
-    └── decoder.npz
-```
+This package uses `PyTorchLayerNorm` which computes `sqrt(var + eps)` instead of Flux's `sqrt(var + eps^2)`. This is critical for numerical parity.
 
 ## Numerical Parity
 
