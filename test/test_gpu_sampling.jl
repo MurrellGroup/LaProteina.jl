@@ -24,7 +24,7 @@ end
 weights_dir = joinpath(@__DIR__, "..", "weights")
 score_net_path = joinpath(weights_dir, "score_network.npz")
 decoder_path = joinpath(weights_dir, "decoder.npz")
-output_dir = joinpath(@__DIR__, "samples_gpu_110"
+output_dir = joinpath(@__DIR__, "samples_gpu_110")
 mkpath(output_dir)
 
 println("\n=== Loading Models ===")

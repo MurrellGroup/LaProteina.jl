@@ -8,6 +8,22 @@ using BranchingFlows: branching_bridge, CoalescentFlow
 using Distributions: Uniform, Poisson
 
 """
+    softclamp(loss; threshold=2.0, hardcap=3.0)
+
+Soft clamp for loss values to prevent gradient explosions.
+Above threshold, transitions to log growth: threshold + log(loss - threshold + 1)
+Then applies a hard cap to ensure output never exceeds hardcap.
+"""
+function softclamp(loss; threshold=3.5f0, hardcap=5.0f0)
+    if loss > threshold
+        clamped = threshold + log((loss - threshold) + 1)
+        return min(clamped, hardcap)
+    else
+        return loss
+    end
+end
+
+"""
     branching_training_batch(proteins::Vector, indices::Vector{Int}, P::CoalescentFlow;
                               latent_dim::Int=8,
                               mean_length::Int=100,

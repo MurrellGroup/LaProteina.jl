@@ -2,7 +2,7 @@
 # Uses gen() from Flowfusion.jl for sampling
 
 import Flowfusion
-import Flowfusion: RDNFlow, gen
+import Flowfusion: RDNFlow, gen, schedule_transform
 using ForwardBackward: ContinuousState, tensor
 using Flux: cpu, gpu
 
@@ -82,18 +82,20 @@ end
 Mutable wrapper to allow self-conditioning state updates during gen().
 Supports GPU acceleration via device function.
 """
-mutable struct MutableScoreNetworkWrapper{D}
+mutable struct MutableScoreNetworkWrapper{D, P}
     score_net::ScoreNetwork
     L::Int
     B::Int
     self_cond::Bool
     dev::D  # Device function: gpu or identity for CPU
+    processes::P  # Optional (P_ca, P_ll) tuple — if set, applies schedule_transform per modality
     x_sc::Union{Nothing, Tuple{AbstractArray{Float32,3}, AbstractArray{Float32,3}}}
 end
 
 function MutableScoreNetworkWrapper(score_net::ScoreNetwork, L::Int, B::Int;
-                                     self_cond::Bool=true, dev=identity)
-    MutableScoreNetworkWrapper(score_net, L, B, self_cond, dev, nothing)
+                                     self_cond::Bool=true, dev=identity,
+                                     processes=nothing)
+    MutableScoreNetworkWrapper(score_net, L, B, self_cond, dev, processes, nothing)
 end
 
 function (wrapper::MutableScoreNetworkWrapper)(t, Xₜ)
@@ -106,20 +108,35 @@ function (wrapper::MutableScoreNetworkWrapper)(t, Xₜ)
     B = wrapper.B
     dev = wrapper.dev
 
-    # Create mask and time vector
+    # Apply per-modality schedule transforms if processes are provided.
+    # This converts raw uniform progress u to the actual interpolation time τ(u)
+    # that the model was trained on.
+    t_raw = Float32(t)
+    if !isnothing(wrapper.processes)
+        P_ca, P_ll = wrapper.processes
+        t_ca = schedule_transform(P_ca, t_raw)
+        t_ll = schedule_transform(P_ll, t_raw)
+    else
+        t_ca = t_raw
+        t_ll = t_raw
+    end
+
+    # Create mask and time vectors
     mask = ones(Float32, L, B)
-    t_vec = fill(Float32(t), B)
+    t_vec_ca = fill(t_ca, B)
+    t_vec_ll = fill(t_ll, B)
 
     # Move data to device for model forward pass
     x_ca_dev = dev(x_ca)
     x_ll_dev = dev(x_ll)
     mask_dev = dev(mask)
-    t_vec_dev = dev(t_vec)
+    t_vec_ca_dev = dev(t_vec_ca)
+    t_vec_ll_dev = dev(t_vec_ll)
 
     # Build batch dict on device
     batch = Dict{Symbol, Any}(
         :x_t => Dict(:bb_ca => x_ca_dev, :local_latents => x_ll_dev),
-        :t => Dict(:bb_ca => t_vec_dev, :local_latents => t_vec_dev),
+        :t => Dict(:bb_ca => t_vec_ca_dev, :local_latents => t_vec_ll_dev),
         :mask => mask_dev
     )
 
@@ -131,12 +148,12 @@ function (wrapper::MutableScoreNetworkWrapper)(t, Xₜ)
     # Call ScoreNetwork on device
     output = wrapper.score_net(batch)
 
-    # Extract X̂₁ on device
+    # Extract X̂₁ on device — use per-modality transformed times for v_to_x1
     if wrapper.score_net.output_param == :v
         v_ca = output[:bb_ca][:v]
         v_ll = output[:local_latents][:v]
-        x1_ca_dev = v_to_x1(x_ca_dev, v_ca, t)
-        x1_ll_dev = v_to_x1(x_ll_dev, v_ll, t)
+        x1_ca_dev = v_to_x1(x_ca_dev, v_ca, t_ca)
+        x1_ll_dev = v_to_x1(x_ll_dev, v_ll, t_ll)
     else
         x1_ca_dev = output[:bb_ca][:x1]
         x1_ll_dev = output[:local_latents][:x1]
