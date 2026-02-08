@@ -17,6 +17,7 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 
 using LaProteina
 using LaProteina: ScoreNetworkRawFeatures, extract_raw_features, cpu
+using LaProteina: compute_sc_feature_offsets, update_sc_raw_features!
 using BranchingFlows
 using BranchingFlows: BranchingState, CoalescentFlow, branching_bridge, Deletion
 using ForwardBackward: ContinuousState, DiscreteState, tensor
@@ -130,6 +131,7 @@ load_branching_weights!(model, indel_weights_path; base_weights_path=base_weight
 
 base_model_cpu = deepcopy(model.base)
 model = dev(model)
+sc_offsets = compute_sc_feature_offsets(base_model_cpu)
 logprintln("Model loaded and on GPU")
 
 # ============================================================================
@@ -356,7 +358,7 @@ for bs in batch_sizes
             L_batch = size(bd.mask, 1)
             push!(seq_lens_bs, L_batch)
 
-            # Self-conditioning (1 pass)
+            # Self-conditioning (1 pass) — in-place GPU update, no CPU round-trip
             out_sc = forward_branching_from_raw_features_gpu(model, raw_features_for_training)
             v_ca_sc = out_sc[:bb_ca][:v]
             v_ll_sc = out_sc[:local_latents][:v]
@@ -364,15 +366,7 @@ for bs in batch_sizes
             t_ll_exp_sc = reshape(bd.t_ll, 1, 1, :)
             x1_ca_sc = bd.xt_ca .+ (1f0 .- t_ca_exp_sc) .* v_ca_sc
             x1_ll_sc = bd.xt_ll .+ (1f0 .- t_ll_exp_sc) .* v_ll_sc
-            x_sc = Dict(:bb_ca => cpu(x1_ca_sc), :local_latents => cpu(x1_ll_sc))
-
-            batch_with_sc = Dict{Symbol, Any}(
-                :x_t => Dict(:bb_ca => bd_cpu.xt_ca, :local_latents => bd_cpu.xt_ll),
-                :t => Dict(:bb_ca => bd_cpu.t_ca, :local_latents => bd_cpu.t_ll),
-                :mask => bd_cpu.mask,
-                :x_sc => x_sc
-            )
-            raw_features_for_training = dev(extract_raw_features(base_model_cpu, batch_with_sc))
+            update_sc_raw_features!(raw_features_for_training, sc_offsets, x1_ca_sc, x1_ll_sc)
 
             # Forward + backward + optimizer step
             loss, grads = Flux.withgradient(model) do m

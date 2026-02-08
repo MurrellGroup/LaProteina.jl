@@ -19,6 +19,7 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 
 using LaProteina
 using LaProteina: ScoreNetworkRawFeatures, extract_raw_features, cpu
+using LaProteina: compute_sc_feature_offsets, update_sc_raw_features!
 using LaProteina: DecoderTransformer, load_decoder_weights!, samples_to_pdb
 using BranchingFlows
 using BranchingFlows: BranchingState, CoalescentFlow, branching_bridge, Deletion
@@ -190,6 +191,10 @@ base_model_cpu = deepcopy(model.base)
 
 model = dev(model)
 println("Model loaded and moved to device")
+
+# Precompute SC feature offsets for in-place GPU update (avoids CPU round-trip)
+sc_offsets = compute_sc_feature_offsets(base_model_cpu)
+println("SC feature offsets: seq=$(sc_offsets.seq), pair=$(sc_offsets.pair)")
 
 # Setup optimizer for FULL model (not frozen)
 opt_state = Flux.setup(Muon(eta=sched.lr), model)
@@ -507,30 +512,20 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
     t_max_ref = Ref(0f0)
 
     # Self-conditioning (BranchChain style: Poisson(1) passes outside grad)
+    # Uses in-place GPU update instead of CPU round-trip for ~2.3x speedup
     raw_features_for_training = dev(bd.raw_features)
     n_sc_passes = rand(Poisson(1))
     if n_sc_passes > 0
-        # Run model to get x1 predictions for self-conditioning
-        x_sc = nothing
         for _ in 1:n_sc_passes
             out_sc = forward_branching_from_raw_features_gpu(model, raw_features_for_training)
-            # Convert v to x1
             v_ca_sc = out_sc[:bb_ca][:v]
             v_ll_sc = out_sc[:local_latents][:v]
             t_ca_exp_sc = reshape(bd.t_ca, 1, 1, :)
             t_ll_exp_sc = reshape(bd.t_ll, 1, 1, :)
             x1_ca_sc = bd.xt_ca .+ (1f0 .- t_ca_exp_sc) .* v_ca_sc
             x1_ll_sc = bd.xt_ll .+ (1f0 .- t_ll_exp_sc) .* v_ll_sc
-            x_sc = Dict(:bb_ca => cpu(x1_ca_sc), :local_latents => cpu(x1_ll_sc))
-            # Re-extract features on CPU with base_model_cpu, then move to GPU
-            # Use bd_cpu (not bd) since bd was moved to GPU
-            batch_with_sc = Dict{Symbol, Any}(
-                :x_t => Dict(:bb_ca => bd_cpu.xt_ca, :local_latents => bd_cpu.xt_ll),
-                :t => Dict(:bb_ca => bd_cpu.t_ca, :local_latents => bd_cpu.t_ll),
-                :mask => bd_cpu.mask,
-                :x_sc => x_sc
-            )
-            raw_features_for_training = dev(extract_raw_features(base_model_cpu, batch_with_sc))
+            # In-place update of SC channels on GPU (no CPU round-trip)
+            update_sc_raw_features!(raw_features_for_training, sc_offsets, x1_ca_sc, x1_ll_sc)
         end
     end
 
