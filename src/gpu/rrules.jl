@@ -31,8 +31,6 @@ function CRC.rrule(::typeof(layernorm_forward),
         dy_w = dy .* w
         c1 = sum(dy_w .* xhat; dims=1) .* inv_c
         c2 = sum(dy_w; dims=1) .* inv_c
-        # inv_std = 1/sqrt(var+eps), but we can recover it from xhat
-        # Actually, compute from scratch for correctness
         mu = mean(x; dims=1)
         diff = x .- mu
         var_x = mean(diff .* diff; dims=1)

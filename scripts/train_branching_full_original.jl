@@ -97,6 +97,9 @@ println("Sample every: $sample_every batches")
 println("Optimizer: Muon with burnin_learning_schedule(1e-5, 2.5e-4, 1.05, 0.99995)")
 println("Log file: $log_file")
 
+# RMSD diagnostic log (separate file)
+rmsd_log_file = joinpath(output_dir, "rmsd_diagnostics.txt")
+
 # Write initial config to log
 open(log_file, "w") do io
     println(io, "# Branching Flows Full Training Log")
@@ -108,6 +111,13 @@ open(log_file, "w") do io
     println(io, "# Columns: batch,shard,lr,total_loss,ca_scaled,ll_scaled,split,del,t_min,t_max,time_ms")
 end
 
+# Write RMSD log header
+open(rmsd_log_file, "w") do io
+    println(io, "# RMSD Diagnostics - first sample per batch")
+    println(io, "# Started: $(now())")
+    println(io, "# Columns: batch,t_raw,t_ca,t_ll,rmsd_xt_x1,rmsd_x1hat_x1,xt_ca_norm,x1_ca_norm,n_valid")
+end
+
 # ============================================================================
 # GPU Check
 # ============================================================================
@@ -116,9 +126,6 @@ if CUDA.functional()
     println("CUDA is functional!")
     println("Device: $(CUDA.device())")
     println("Memory: $(round(CUDA.available_memory() / 1e9, digits=2)) GB available")
-    LaProteina.enable_tf32!()  # TF32 + cuDNN ACCURATE softmax fix
-    println("TF32 math mode: $(CUDA.math_mode())")
-    println("cuTile available: $(LaProteina._HAS_CUTILE)")
     dev = gpu
 else
     println("No CUDA - using CPU")
@@ -448,6 +455,12 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
     del_loss_ref = Ref(0f0)
     t_min_ref = Ref(0f0)
     t_max_ref = Ref(0f0)
+    # RMSD diagnostic refs (first sample only)
+    rmsd_xt_x1_ref = Ref(0f0)
+    rmsd_x1hat_x1_ref = Ref(0f0)
+    xt_ca_norm_ref = Ref(0f0)
+    x1_ca_norm_ref = Ref(0f0)
+    n_valid_ref = Ref(0)
 
     # Self-conditioning (BranchChain style: Poisson(1) passes outside grad)
     raw_features_for_training = dev(bd.raw_features)
@@ -456,7 +469,7 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
         # Run model to get x1 predictions for self-conditioning
         x_sc = nothing
         for _ in 1:n_sc_passes
-            out_sc = forward_branching_from_raw_features_gpu(model, raw_features_for_training)
+            out_sc = forward_branching_from_raw_features(model, raw_features_for_training)
             # Convert v to x1
             v_ca_sc = out_sc[:bb_ca][:v]
             v_ll_sc = out_sc[:local_latents][:v]
@@ -479,32 +492,7 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
 
     # Compute loss and gradients
     loss, grads = Flux.withgradient(model) do m
-        out = forward_branching_from_raw_features_gpu(m, raw_features_for_training)
-
-        # Diagnostic: check model output for NaN (first 5 batches)
-        Zygote.ignore() do
-            if batch_idx <= 5
-                for (k, v_dict) in out
-                    if v_dict isa Dict
-                        for (k2, val) in v_dict
-                            if val isa CuArray
-                                n_nan = count(isnan, Array(val))
-                                if n_nan > 0
-                                    @printf("  OUTPUT NaN: out[%s][%s] has %d NaN values (shape=%s)\n",
-                                            string(k), string(k2), n_nan, string(size(val)))
-                                end
-                            end
-                        end
-                    elseif v_dict isa CuArray
-                        n_nan = count(isnan, Array(v_dict))
-                        if n_nan > 0
-                            @printf("  OUTPUT NaN: out[%s] has %d NaN values (shape=%s)\n",
-                                    string(k), n_nan, string(size(v_dict)))
-                        end
-                    end
-                end
-            end
-        end
+        out = forward_branching_from_raw_features(m, raw_features_for_training)
 
         v_ca = out[:bb_ca][:v]
         v_ll = out[:local_latents][:v]
@@ -526,7 +514,7 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
         split_l = floss(P, out[:split], bd.split_target, bd.combined_mask, indel_scale)
         del_l = floss(P.deletion_policy, out[:del], bd.del_target, bd.combined_mask, indel_scale)
 
-        # Log individual losses
+        # Log SCALED losses and RMSD diagnostics
         Zygote.ignore() do
             ca_loss_ref[] = Float32(cpu(ca_loss)) * ca_loss_scale
             ll_loss_ref[] = Float32(cpu(ll_loss)) * ll_loss_scale
@@ -534,6 +522,27 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
             del_loss_ref[] = Float32(cpu(del_l))
             t_min_ref[] = Float32(minimum(cpu(bd.t_vec)))
             t_max_ref[] = Float32(maximum(cpu(bd.t_vec)))
+
+            # RMSD diagnostics for first sample in batch
+            xt_1 = cpu(bd.xt_ca[:, :, 1])        # [3, L]
+            x1_1 = cpu(bd.x1_ca_target[:, :, 1]) # [3, L]
+            x1h_1 = cpu(x1_ca[:, :, 1])          # [3, L]
+            m1 = cpu(bd.mask[:, 1])               # [L]
+            nv = max(Int(sum(m1 .> 0.5f0)), 1)
+            m1_exp = reshape(m1, 1, :)            # [1, L]
+
+            # RMSD(Xt, X1) - baseline: how far is interpolated state from target
+            d_xt = sum((xt_1 .- x1_1).^2 .* m1_exp) / nv
+            rmsd_xt_x1_ref[] = Float32(sqrt(d_xt))
+
+            # RMSD(X1_hat, X1) - prediction quality
+            d_hat = sum((x1h_1 .- x1_1).^2 .* m1_exp) / nv
+            rmsd_x1hat_x1_ref[] = Float32(sqrt(d_hat))
+
+            # Norms to check Xt_ca is non-degenerate
+            xt_ca_norm_ref[] = Float32(sqrt(sum(xt_1.^2 .* m1_exp) / nv))
+            x1_ca_norm_ref[] = Float32(sqrt(sum(x1_1.^2 .* m1_exp) / nv))
+            n_valid_ref[] = nv
         end
 
         # Clamp individual losses BEFORE summing to prevent NaN gradients
@@ -548,48 +557,6 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
 
         # Hard clamp on total loss (4 components each ~1.0, so cap at 8.0)
         min(total_loss, 20.0f0)
-    end
-
-    # === Gradient diagnostics (first 5 batches only, summary only) ===
-    if batch_idx <= 5
-        grad_tree = grads[1]
-        n_nan_grad = 0
-        n_inf_grad = 0
-        max_grad = 0f0
-        max_grad_name = ""
-        n_params_checked = 0
-        function _walk_grads(tree, prefix)
-            if tree === nothing
-                return
-            elseif tree isa NamedTuple
-                for name in keys(tree)
-                    _walk_grads(getfield(tree, name), "$(prefix).$(name)")
-                end
-            elseif tree isa Tuple
-                for (i, v) in enumerate(tree)
-                    _walk_grads(v, "$(prefix)[$(i)]")
-                end
-            elseif tree isa AbstractArray && length(tree) > 0
-                arr = Array(tree)
-                n_nan_local = count(isnan, arr)
-                n_inf_local = count(isinf, arr)
-                local_max = maximum(x -> isnan(x) || isinf(x) ? 0f0 : abs(x), arr)
-                n_nan_grad += n_nan_local
-                n_inf_grad += n_inf_local
-                n_params_checked += 1
-                if local_max > max_grad
-                    max_grad = local_max
-                    max_grad_name = prefix
-                end
-            end
-        end
-        try
-            _walk_grads(grad_tree, "model")
-        catch e
-            println("  Error walking gradients: ", e)
-        end
-        @printf("  Batch %d grad stats: %d params, %d NaN, %d Inf, max=%.4e at %s\n",
-                batch_idx, n_params_checked, n_nan_grad, n_inf_grad, max_grad, max_grad_name)
     end
 
     # Update model
@@ -621,6 +588,14 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
                 t_min_ref[], t_max_ref[], batch_time)
     end
 
+    # Write RMSD diagnostics (every batch, first sample only)
+    open(rmsd_log_file, "a") do io
+        @printf(io, "%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d\n",
+                batch_idx, bd_cpu.t_vec[1], bd_cpu.t_ca[1], bd_cpu.t_ll[1],
+                rmsd_xt_x1_ref[], rmsd_x1hat_x1_ref[],
+                xt_ca_norm_ref[], x1_ca_norm_ref[], n_valid_ref[])
+    end
+
     # Console logging (every 100 batches)
     if batch_idx % 100 == 0 || batch_idx == 1
         avg_loss = mean(losses[max(1, end-99):end])
@@ -637,6 +612,9 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
 
         @printf("Batch %6d [shard %2d]: loss=%.3f (ca=%.3f, ll=%.3f, split=%.3f, del=%.3f), lr=%.2e%s, time=%.0fms\n",
                 batch_idx, shard_idx, avg_loss, avg_ca, avg_ll, avg_split, avg_del, sched.lr, warmup_status, avg_time)
+        @printf("  RMSD: xt→x1=%.4f, x1hat→x1=%.4f, |xt_ca|=%.4f, |x1_ca|=%.4f (t_raw=%.3f, t_ca=%.3f, nv=%d)\n",
+                rmsd_xt_x1_ref[], rmsd_x1hat_x1_ref[], xt_ca_norm_ref[], x1_ca_norm_ref[],
+                bd_cpu.t_vec[1], bd_cpu.t_ca[1], n_valid_ref[])
 
         if CUDA.functional()
             GC.gc()
