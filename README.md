@@ -66,6 +66,8 @@ The model uses self-conditioning: the predicted `x_1` from the previous timestep
 
 ## Architecture
 
+See [docs/model_architecture.md](docs/model_architecture.md) for a full deep dive including AdaLN variants, SwiGLU details, and BranchingScoreNetwork internals.
+
 ### ScoreNetwork
 
 The core model is a 14-layer transformer with:
@@ -83,6 +85,8 @@ Each transformer layer consists of:
 Input features include:
 - Sequence features: time embedding, position embedding, noisy CA coords, noisy latents, self-conditioning predictions
 - Pair features: pairwise CA distances (binned), relative sequence separation
+
+See [docs/feature_system.md](docs/feature_system.md) for the complete feature catalog (29 feature types) and pre-configured factory functions.
 
 ### DecoderTransformer
 
@@ -121,6 +125,8 @@ Proteins are filtered during preprocessing:
 Typical filtering results: ~80% of proteins pass length filter, ~0% parse failures.
 
 ## Training Pipeline
+
+See [docs/training_guide.md](docs/training_guide.md) for full training configuration, monitoring, and hyperparameter reference. See [docs/data_pipeline.md](docs/data_pipeline.md) for data loading details.
 
 Training uses a two-stage approach for efficiency:
 
@@ -191,6 +197,8 @@ end
 ```
 
 ## Quick Start: Inference
+
+See [docs/inference_sampling.md](docs/inference_sampling.md) for the full sampling guide including SDE parameters, self-conditioning details, and PDB output.
 
 ### Fixed-Length Generation (Base Model)
 
@@ -314,15 +322,31 @@ LaProteina/
 │   │   ├── transformer_block.jl   # Transformer blocks, PairUpdate
 │   │   ├── encoder.jl             # VAE encoder
 │   │   ├── encoder_efficient.jl   # Efficient encoder for precomputation
+│   │   ├── autoencoder.jl         # Combined VAE (encoder + decoder)
 │   │   ├── score_network.jl       # ScoreNetwork (main model)
 │   │   ├── score_network_efficient.jl  # GPU-optimized ScoreNetwork
 │   │   └── decoder.jl             # VAE decoder
+│   ├── gpu/
+│   │   ├── gpu.jl                 # Mode selection (cuTile / NocuTile / no overrides)
+│   │   ├── dispatch.jl            # Dispatch thresholds for fused kernels
+│   │   ├── rrules.jl              # ChainRulesCore backward rules
+│   │   ├── layers.jl              # CuArray attention, pre-normed pairs
+│   │   ├── layers_nocutile.jl     # NNlib fallback overrides
+│   │   ├── checkpointing.jl       # safe_checkpointed for gradient checkpointing
+│   │   ├── utils.jl               # TF32, buffer pooling, within_gradient
+│   │   ├── utils_nocutile.jl      # Utilities for NocuTile mode
+│   │   ├── stubs.jl               # Stubs when GPU unavailable
+│   │   └── kernels/
+│   │       ├── fmha.jl            # Flash attention forward kernels
+│   │       ├── fmha_bwd.jl        # Flash attention backward kernels
+│   │       └── layernorm.jl       # Fused LayerNorm kernels
 │   ├── training/
 │   │   └── precompute_encoder.jl  # Precomputed training data utilities
 │   ├── data/
 │   │   ├── pdb_loading.jl         # PDB/mmCIF file I/O
 │   │   └── transforms.jl          # Data transforms
 │   └── branching/
+│       ├── BranchingLaProteina.jl # Branching submodule entry point
 │       ├── branching_score_network.jl  # BranchingScoreNetwork
 │       ├── branching_inference.jl      # Generation with branching
 │       ├── branching_training.jl       # Training utilities
@@ -331,13 +355,25 @@ LaProteina/
 │   ├── train_branching_full.jl    # Branching flows training (full)
 │   ├── plot_training.jl           # Training loss visualization
 │   ├── precompute_all_training_data.jl  # Dataset precomputation
-│   └── extract_weights.py         # Weight extraction from Python
+│   ├── extract_weights.py         # Weight extraction from Python
+│   ├── extract_encoder_weights.py # Encoder weight extraction
+│   ├── benchmark_*.jl             # Various benchmarking scripts
+│   └── profile_*.jl               # Profiling scripts
 ├── test/
 │   ├── test_gpu_sampling.jl       # Base model sampling test
 │   ├── test_branching_full_sampling.jl  # Branching model sampling
-│   └── ...                        # Parity tests, feature tests, etc.
+│   ├── test_*_parity.jl           # Numerical parity tests vs Python
+│   ├── test_flash_attention_grad.jl    # cuTile gradient correctness
+│   ├── test_cutile_model_grad.jl       # Full model gradient with cuTile
+│   └── ...                        # Feature tests, training tests, etc.
 ├── weights/                       # Place weights here (not in git)
 └── docs/
+    ├── model_architecture.md      # Neural network architecture deep dive
+    ├── feature_system.md          # Feature extraction pipeline (29 features)
+    ├── gpu_optimizations.md       # cuTile kernels, fused ops, GPU modes
+    ├── training_guide.md          # Training configuration and monitoring
+    ├── data_pipeline.md           # Data loading, precomputation, sharding
+    ├── inference_sampling.md      # Generation and sampling guide
     ├── branching_flows.md         # Branching Flows integration guide
     └── branching_flows_conversion.md  # Conversion reference
 ```
@@ -349,6 +385,10 @@ LaProteina/
 Julia uses column-major order, so tensors are transposed from Python:
 - Python: `[Batch, Length, Dim]`
 - Julia: `[Dim, Length, Batch]`
+
+### GPU Acceleration
+
+The package includes custom CUDA kernels (cuTile flash attention, fused LayerNorm) for training and inference performance. Three operating modes are available, controlled by environment variables. See [docs/gpu_optimizations.md](docs/gpu_optimizations.md) for full details.
 
 ### PyTorchLayerNorm
 
