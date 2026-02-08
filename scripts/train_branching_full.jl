@@ -586,7 +586,8 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
         try
             _walk_grads(grad_tree, "model")
         catch e
-            println("  Error walking gradients: ", e)
+            # SAFETY: never println(e) — error objects can contain huge arrays
+            println("  Error walking gradients: ", typeof(e), " — ", sprint(showerror, e; context=:limit=>true)[1:min(200, end)])
         end
         @printf("  Batch %d grad stats: %d params, %d NaN, %d Inf, max=%.4e at %s\n",
                 batch_idx, n_params_checked, n_nan_grad, n_inf_grad, max_grad, max_grad_name)
