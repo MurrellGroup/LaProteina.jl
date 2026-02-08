@@ -309,7 +309,56 @@ function protein_to_X1_simple(protein)
     )
 end
 
-function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_model)
+"""Pad all batch tensors so seq_len is a multiple of `pad_to`. No-op when already aligned."""
+function pad_batch_to(bd, pad_to::Int)
+    pad_to <= 0 && return bd
+    L = size(bd.mask, 1)
+    rem = L % pad_to
+    rem == 0 && return bd  # already aligned
+    pad_len = pad_to - rem
+    L_new = L + pad_len
+    B = size(bd.mask, 2)
+
+    # Helper: zero-pad along the L dimension(s)
+    pad3(x) = cat(x, zeros(Float32, size(x,1), pad_len, size(x,3)); dims=2)
+    pad2(x) = cat(x, zeros(Float32, pad_len, B); dims=1)
+    function pad4_pair(x)  # [D, L, L, B] -> [D, L_new, L_new, B]
+        x2 = cat(x, zeros(Float32, size(x,1), pad_len, size(x,3), B); dims=2)
+        cat(x2, zeros(Float32, size(x2,1), L_new, pad_len, B); dims=3)
+    end
+
+    rf = bd.raw_features
+    new_rf = LaProteina.ScoreNetworkRawFeatures(
+        pad3(rf.seq_raw), pad3(rf.cond_raw),
+        pad4_pair(rf.pair_raw), pad4_pair(rf.pair_cond_raw),
+        pad2(rf.mask)
+    )
+
+    new_cpu_batch = Dict{Symbol, Any}(
+        :x_t => Dict(:bb_ca => pad3(bd.cpu_batch[:x_t][:bb_ca]),
+                      :local_latents => pad3(bd.cpu_batch[:x_t][:local_latents])),
+        :t => bd.cpu_batch[:t],  # [B] — no L dim
+        :mask => pad2(bd.cpu_batch[:mask])
+    )
+
+    return (
+        raw_features = new_rf,
+        cpu_batch = new_cpu_batch,
+        xt_ca = pad3(bd.xt_ca),
+        xt_ll = pad3(bd.xt_ll),
+        mask = pad2(bd.mask),
+        combined_mask = pad2(bd.combined_mask),
+        x1_ca_target = pad3(bd.x1_ca_target),
+        x1_ll_target = pad3(bd.x1_ll_target),
+        split_target = pad2(bd.split_target),
+        del_target = pad2(bd.del_target),
+        t_vec = bd.t_vec,
+        t_ca = bd.t_ca,
+        t_ll = bd.t_ll
+    )
+end
+
+function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_model; pad_to::Int=0)
     X1s = [protein_to_X1_simple(proteins_ref[i]) for i in indices]
 
     t_dist = Uniform(0f0, 1f0)
@@ -363,7 +412,7 @@ function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_m
 
     raw_features = extract_raw_features(base_model, cpu_batch)
 
-    return (
+    bd = (
         raw_features = raw_features,
         cpu_batch = cpu_batch,  # For re-extraction with x_sc
         xt_ca = xt_ca_cpu,
@@ -378,6 +427,8 @@ function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_m
         t_ca = t_ca_cpu,
         t_ll = t_ll_cpu
     )
+
+    return pad_batch_to(bd, pad_to)
 end
 
 # Pre-sample batch indices with shard tracking
@@ -398,14 +449,16 @@ struct BatchDataset{P, S, M}
     proteins::P
     process::S
     base_model::M
+    pad_to::Int
 end
 
 Base.length(x::BatchDataset) = length(x.batch_indices)
 function Base.getindex(x::BatchDataset, i::Int)
-    prepare_training_batch(x.batch_indices[i], x.proteins, x.process, X0_sampler_train, x.base_model)
+    prepare_training_batch(x.batch_indices[i], x.proteins, x.process, X0_sampler_train, x.base_model; pad_to=x.pad_to)
 end
 
-dataset = BatchDataset(batch_indices, all_proteins, P, base_model_cpu)
+const TILE_SIZE = 64
+dataset = BatchDataset(batch_indices, all_proteins, P, base_model_cpu, TILE_SIZE)
 dataloader = Flux.DataLoader(dataset; batchsize=-1, parallel=true)
 println("DataLoader created with parallel=true, batchsize=-1")
 
@@ -426,69 +479,14 @@ split_losses = Float32[]
 del_losses = Float32[]
 batch_times = Float64[]
 
-# --- TEMPORARY: pad batch seq_len to multiple of TILE_SIZE to test OOB hypothesis ---
-const TILE_SIZE = 64
-function pad_batch_to_tile(bd)
-    L = size(bd.mask, 1)
-    rem = L % TILE_SIZE
-    rem == 0 && return bd  # already aligned
-    pad_len = TILE_SIZE - rem
-    L_new = L + pad_len
-    B = size(bd.mask, 2)
-
-    # Helper: zero-pad along the L dimension(s)
-    pad3(x, dim=2) = cat(x, zeros(Float32, size(x,1), pad_len, size(x,3)); dims=dim)
-    pad2(x) = cat(x, zeros(Float32, pad_len, B); dims=1)
-    function pad4_pair(x)  # [D, L, L, B] -> [D, L_new, L_new, B]
-        # pad dim 2 then dim 3
-        x2 = cat(x, zeros(Float32, size(x,1), pad_len, size(x,3), B); dims=2)
-        cat(x2, zeros(Float32, size(x2,1), L_new, pad_len, B); dims=3)
-    end
-
-    rf = bd.raw_features
-    new_rf = LaProteina.ScoreNetworkRawFeatures(
-        pad3(rf.seq_raw), pad3(rf.cond_raw),
-        pad4_pair(rf.pair_raw), pad4_pair(rf.pair_cond_raw),
-        pad2(rf.mask)
-    )
-
-    # Pad cpu_batch for self-conditioning re-extraction
-    new_cpu_batch = Dict{Symbol, Any}(
-        :x_t => Dict(:bb_ca => pad3(bd.cpu_batch[:x_t][:bb_ca]),
-                      :local_latents => pad3(bd.cpu_batch[:x_t][:local_latents])),
-        :t => bd.cpu_batch[:t],  # [B] — no L dim
-        :mask => pad2(bd.cpu_batch[:mask])
-    )
-
-    return (
-        raw_features = new_rf,
-        cpu_batch = new_cpu_batch,
-        xt_ca = pad3(bd.xt_ca),
-        xt_ll = pad3(bd.xt_ll),
-        mask = pad2(bd.mask),
-        combined_mask = pad2(bd.combined_mask),
-        x1_ca_target = pad3(bd.x1_ca_target),
-        x1_ll_target = pad3(bd.x1_ll_target),
-        split_target = pad2(bd.split_target),
-        del_target = pad2(bd.del_target),
-        t_vec = bd.t_vec,
-        t_ca = bd.t_ca,
-        t_ll = bd.t_ll
-    )
-end
 println("TILE_SIZE padding enabled: all batches padded to multiple of $TILE_SIZE")
-# --- END TEMPORARY ---
-
 println("Starting training loop...")
 println("Batch size: $batch_size, N batches: $n_batches")
 
 t_train_start = time()
 
-for (batch_idx, bd_cpu_raw) in enumerate(dataloader)
+for (batch_idx, bd_cpu) in enumerate(dataloader)
     t_batch = time()
-
-    # TEMPORARY: pad to tile-aligned length
-    bd_cpu = pad_batch_to_tile(bd_cpu_raw)
 
     # Transfer entire batch to GPU at once
     bd = dev(bd_cpu)
