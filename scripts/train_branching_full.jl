@@ -60,8 +60,8 @@ shard_dir = get(ENV, "SHARD_DIR", expanduser("~/shared_data/afdb_laproteina/prec
 weights_dir = get(ENV, "WEIGHTS_DIR", joinpath(@__DIR__, "..", "weights"))
 output_dir = get(ENV, "OUTPUT_DIR", joinpath(@__DIR__, "..", "outputs", "branching_full_$(Dates.format(now(), "yyyymmdd_HHMMSS"))"))
 batch_size = parse(Int, get(ENV, "BATCH_SIZE", "8"))
-n_batches = parse(Int, get(ENV, "N_BATCHES", "20000"))
-warmdown_batches = parse(Int, get(ENV, "WARMDOWN_BATCHES", "2000"))
+n_batches = parse(Int, get(ENV, "N_BATCHES", "200000"))
+warmdown_batches = parse(Int, get(ENV, "WARMDOWN_BATCHES", "20000"))
 sample_every = parse(Int, get(ENV, "SAMPLE_EVERY", "1000"))
 latent_dim = 8
 
@@ -513,7 +513,7 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
 
     # Self-conditioning (BranchChain style: Poisson(1) passes outside grad)
     # Uses in-place GPU update instead of CPU round-trip for ~2.3x speedup
-    raw_features_for_training = dev(bd.raw_features)
+    raw_features_for_training = bd.raw_features
     n_sc_passes = rand(Poisson(1))
     if n_sc_passes > 0
         for _ in 1:n_sc_passes
@@ -602,73 +602,14 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
         min(total_loss, 20.0f0)
     end
 
-    # === Gradient diagnostics (first 20 batches, or whenever NaN detected) ===
-    do_grad_check = batch_idx <= 20 || !isfinite(Float64(cpu(loss)))
-    if do_grad_check
-        grad_tree = grads[1]
-        n_nan_grad = 0
-        n_inf_grad = 0
-        max_grad = 0f0
-        max_grad_name = ""
-        first_nan_name = ""
-        n_params_checked = 0
-        function _walk_grads(tree, prefix)
-            if tree === nothing
-                return
-            elseif tree isa NamedTuple
-                for name in keys(tree)
-                    _walk_grads(getfield(tree, name), "$(prefix).$(name)")
-                end
-            elseif tree isa Tuple
-                for (i, v) in enumerate(tree)
-                    _walk_grads(v, "$(prefix)[$(i)]")
-                end
-            elseif tree isa AbstractArray{<:Number} && length(tree) > 0
-                arr = Array(tree)
-                n_nan_local = count(isnan, arr)
-                n_inf_local = count(isinf, arr)
-                local_max = length(arr) > 0 ? maximum(x -> isnan(x) || isinf(x) ? 0f0 : abs(x), arr) : 0f0
-                n_nan_grad += n_nan_local
-                n_inf_grad += n_inf_local
-                n_params_checked += 1
-                if n_nan_local > 0 && first_nan_name == ""
-                    first_nan_name = prefix
-                end
-                if local_max > max_grad
-                    max_grad = local_max
-                    max_grad_name = prefix
-                end
-            elseif tree isa AbstractArray  # Array of non-Number (e.g. NamedTuples)
-                for (i, elem) in enumerate(tree)
-                    _walk_grads(elem, "$(prefix)[$(i)]")
-                end
-            end
-        end
-        try
-            _walk_grads(grad_tree, "model")
-        catch e
-            # SAFETY: never println(e) — error objects can contain huge arrays
-            println("  Error walking gradients: ", typeof(e), " — ", sprint(showerror, e; context=:limit=>true)[1:min(200, end)])
-        end
-        # Log sequence length for correlation with NaN (hypothesis: non-tile-aligned lengths cause NaN)
+    # NaN loss check — stop early if loss diverges
+    if !isfinite(Float64(cpu(loss)))
         L_batch = size(bd.mask, 1)
-        L_mod64 = L_batch % 64
-        @printf("  Batch %d grad stats: %d params, %d NaN, %d Inf, max=%.4e at %s | L=%d (mod64=%d)%s\n",
-                batch_idx, n_params_checked, n_nan_grad, n_inf_grad, max_grad, max_grad_name,
-                L_batch, L_mod64, first_nan_name != "" ? " | first_nan=$(first_nan_name)" : "")
-
-        # Early stop if gradients are NaN — model is poisoned, no point continuing
-        if n_nan_grad > 0
-            @printf("  FATAL: %d NaN gradient values detected at batch %d (L=%d, mod64=%d). Stopping training.\n",
-                    n_nan_grad, batch_idx, L_batch, L_mod64)
-            println("  This is likely the cuTile flash attention OOB write bug when seq_len %% tile_size != 0")
-            # Log to file before stopping
-            open(log_file, "a") do io
-                @printf(io, "# STOPPED: NaN gradients at batch %d, L=%d (mod64=%d), %d NaN values, first_nan=%s\n",
-                        batch_idx, L_batch, L_mod64, n_nan_grad, first_nan_name)
-            end
-            break
+        @printf("  FATAL: NaN/Inf loss at batch %d (L=%d). Stopping training.\n", batch_idx, L_batch)
+        open(log_file, "a") do io
+            @printf(io, "# STOPPED: NaN/Inf loss at batch %d, L=%d\n", batch_idx, L_batch)
         end
+        break
     end
 
     # Update model
