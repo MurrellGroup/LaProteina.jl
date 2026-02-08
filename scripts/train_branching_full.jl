@@ -9,7 +9,7 @@
 #   SHARD_DIR - Directory containing precomputed shards
 #   WEIGHTS_DIR - Directory containing pretrained weights
 #   OUTPUT_DIR - Directory for outputs (logs, checkpoints, samples)
-#   BATCH_SIZE - Batch size (default: 4)
+#   BATCH_SIZE - Batch size (default: 8)
 #   N_BATCHES - Number of training batches (default: 40000)
 #   WARMDOWN_BATCHES - Linear warmdown batches at end (default: 2000)
 #   SAMPLE_EVERY - Generate samples every N batches (default: 2000)
@@ -58,7 +58,7 @@ println("=" ^ 70)
 shard_dir = get(ENV, "SHARD_DIR", expanduser("~/shared_data/afdb_laproteina/precomputed_shards"))
 weights_dir = get(ENV, "WEIGHTS_DIR", joinpath(@__DIR__, "..", "weights"))
 output_dir = get(ENV, "OUTPUT_DIR", joinpath(@__DIR__, "..", "outputs", "branching_full_$(Dates.format(now(), "yyyymmdd_HHMMSS"))"))
-batch_size = parse(Int, get(ENV, "BATCH_SIZE", "4"))
+batch_size = parse(Int, get(ENV, "BATCH_SIZE", "8"))
 n_batches = parse(Int, get(ENV, "N_BATCHES", "20000"))
 warmdown_batches = parse(Int, get(ENV, "WARMDOWN_BATCHES", "2000"))
 sample_every = parse(Int, get(ENV, "SAMPLE_EVERY", "1000"))
@@ -119,6 +119,9 @@ if CUDA.functional()
     LaProteina.enable_tf32!()  # TF32 + cuDNN ACCURATE softmax fix
     println("TF32 math mode: $(CUDA.math_mode())")
     println("cuTile available: $(LaProteina._HAS_CUTILE)")
+    if !LaProteina._HAS_CUTILE
+        error("cuTile is required for training. Ensure LAPROTEINA_NOCUTILE and LAPROTEINA_NO_OVERRIDES are not set, and recompile LaProteina.")
+    end
     dev = gpu
 else
     println("No CUDA - using CPU")
