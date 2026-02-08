@@ -371,3 +371,113 @@ function load_branching_weights!(model::BranchingScoreNetwork, path::String;
 
     return model
 end
+
+# ============================================================================
+# GPU-optimized forward with pre-normalized pair features
+# ============================================================================
+
+"""
+    forward_branching_from_raw_features_gpu(model::BranchingScoreNetwork,
+                                            raw_features::ScoreNetworkRawFeatures)
+
+GPU-optimized branching forward that pre-normalizes pair features once instead of
+14 times (once per transformer block). Same semantics as `forward_branching_from_raw_features`.
+
+When `update_pair_repr=false` (default), the pair features are constant across blocks.
+Each block's PairBiasAttention.pair_norm computes:
+  normed = (pair_rep - μ) / sqrt(σ² + ε)   # expensive, SAME for all blocks
+  output = normed * scale + bias             # cheap, DIFFERENT per block
+
+This function computes the normalization once and passes pre-normalized pairs
+to each block, which only applies its per-block affine transform.
+
+Savings: 13 × (pair LayerNorm forward + backward) per training step.
+"""
+function forward_branching_from_raw_features_gpu(model::BranchingScoreNetwork,
+                                                  raw_features::ScoreNetworkRawFeatures)
+    mask = raw_features.mask
+    L, B = size(mask)
+    mask_exp = reshape(mask, 1, L, B)
+    pair_mask = reshape(mask, L, 1, B) .* reshape(mask, 1, L, B)
+    pair_mask_exp = reshape(pair_mask, 1, L, L, B)
+
+    base = model.base
+
+    # Project features (same as forward_branching_from_raw_features)
+    cond = base.cond_factory.projection(raw_features.cond_raw)
+    if base.cond_factory.use_ln && !isnothing(base.cond_factory.ln)
+        cond = base.cond_factory.ln(cond)
+    end
+    cond = cond .* mask_exp
+
+    seqs = base.init_repr_factory.projection(raw_features.seq_raw)
+    if base.init_repr_factory.use_ln && !isnothing(base.init_repr_factory.ln)
+        seqs = base.init_repr_factory.ln(seqs)
+    end
+    seqs = seqs .* mask_exp
+
+    pair_rep = base.pair_rep_builder.init_repr_factory.projection(raw_features.pair_raw)
+    if base.pair_rep_builder.init_repr_factory.use_ln && !isnothing(base.pair_rep_builder.init_repr_factory.ln)
+        pair_rep = base.pair_rep_builder.init_repr_factory.ln(pair_rep)
+    end
+    pair_rep = pair_rep .* pair_mask_exp
+
+    cond = base.transition_c_1(cond, mask)
+    cond = base.transition_c_2(cond, mask)
+
+    if !isnothing(base.pair_rep_builder.adaln) && !isnothing(base.pair_rep_builder.cond_factory)
+        # Batch-level pair conditioning (same optimization as ScoreNetwork GPU path)
+        pair_cond_batch_raw = raw_features.pair_cond_raw[:, 1, 1, :]  # [D_raw, B]
+        pair_cond_batch = base.pair_rep_builder.cond_factory.projection(pair_cond_batch_raw)
+        if base.pair_rep_builder.cond_factory.use_ln && !isnothing(base.pair_rep_builder.cond_factory.ln)
+            pair_cond_batch = base.pair_rep_builder.cond_factory.ln(pair_cond_batch)
+        end
+        pair_rep = base.pair_rep_builder.adaln(pair_rep, pair_cond_batch, pair_mask)
+    end
+
+    # === KEY OPTIMIZATION: Pre-normalize pair features once ===
+    if !base.update_pair_repr
+        first_pba = base.transformer_layers[1].mha.mha
+        pair_eps = first_pba.pair_norm.ϵ
+        pair_normed = LaProteina.pytorch_normalise(pair_rep; dims=1, eps=pair_eps)
+    else
+        pair_normed = nothing
+    end
+
+    # Run transformer layers
+    for i in 1:base.n_layers
+        if !isnothing(pair_normed)
+            seqs = LaProteina._transformer_block_prenormed(
+                base.transformer_layers[i], seqs, pair_rep, pair_normed, cond, mask)
+        else
+            seqs = base.transformer_layers[i](seqs, pair_rep, cond, mask)
+        end
+
+        if base.update_pair_repr && i < base.n_layers
+            if !isnothing(base.pair_update_layers[i])
+                pair_rep = base.pair_update_layers[i](seqs, pair_rep, mask)
+                pair_normed = LaProteina.pytorch_normalise(pair_rep; dims=1, eps=pair_eps)
+            end
+        end
+    end
+
+    # Base outputs
+    local_latents_out = base.local_latents_proj(seqs) .* mask_exp
+    ca_out = base.ca_proj(seqs) .* mask_exp
+
+    # Split/del heads (same as original)
+    t_cond = mean(cond, dims=2)
+    indel_cond = model.indel_time_proj(t_cond)
+    seqs_with_time = seqs .+ indel_cond
+
+    split_logits = dropdims(model.split_head(seqs_with_time), dims=1) .* mask
+    del_logits = dropdims(model.del_head(seqs_with_time), dims=1) .* mask
+
+    out_key = base.output_param
+    return Dict(
+        :bb_ca => Dict(out_key => ca_out),
+        :local_latents => Dict(out_key => local_latents_out),
+        :split => split_logits,
+        :del => del_logits
+    )
+end

@@ -116,6 +116,9 @@ if CUDA.functional()
     println("CUDA is functional!")
     println("Device: $(CUDA.device())")
     println("Memory: $(round(CUDA.available_memory() / 1e9, digits=2)) GB available")
+    LaProteina.enable_tf32!()  # TF32 + cuDNN ACCURATE softmax fix
+    println("TF32 math mode: $(CUDA.math_mode())")
+    println("cuTile available: $(LaProteina._HAS_CUTILE)")
     dev = gpu
 else
     println("No CUDA - using CPU")
@@ -453,7 +456,7 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
         # Run model to get x1 predictions for self-conditioning
         x_sc = nothing
         for _ in 1:n_sc_passes
-            out_sc = forward_branching_from_raw_features(model, raw_features_for_training)
+            out_sc = forward_branching_from_raw_features_gpu(model, raw_features_for_training)
             # Convert v to x1
             v_ca_sc = out_sc[:bb_ca][:v]
             v_ll_sc = out_sc[:local_latents][:v]
@@ -476,7 +479,7 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
 
     # Compute loss and gradients
     loss, grads = Flux.withgradient(model) do m
-        out = forward_branching_from_raw_features(m, raw_features_for_training)
+        out = forward_branching_from_raw_features_gpu(m, raw_features_for_training)
 
         v_ca = out[:bb_ca][:v]
         v_ll = out[:local_latents][:v]

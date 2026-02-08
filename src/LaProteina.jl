@@ -56,6 +56,10 @@ include("weights.jl")
 # Training utilities
 include("training/precompute_encoder.jl")
 
+# GPU optimization (cuTile kernels, CuArray method overrides)
+# Must be included after all layer definitions so CuArray methods override defaults
+include("gpu/gpu.jl")
+
 # Exports
 export
     # Constants
@@ -156,6 +160,7 @@ export
 
     # GPU support
     gpu, cpu,
+    enable_tf32!, within_gradient, safe_checkpointed,
 
     # PDB I/O
     load_pdb, extract_ca_coords, batch_pdb_data, save_pdb,

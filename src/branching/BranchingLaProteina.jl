@@ -33,6 +33,7 @@ export
     # Branching Score Network
     BranchingScoreNetwork,
     forward_branching_from_raw_features,
+    forward_branching_from_raw_features_gpu,
     trainable_indel_params,
     load_base_weights!,
 
