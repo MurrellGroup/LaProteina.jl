@@ -20,11 +20,11 @@ weights_path = nothing
 n_samples = 5
 for i in eachindex(ARGS)
     if ARGS[i] == "--mode" && i < length(ARGS)
-        mode = ARGS[i+1]
+        global mode = ARGS[i+1]
     elseif ARGS[i] == "--weights" && i < length(ARGS)
-        weights_path = ARGS[i+1]
+        global weights_path = ARGS[i+1]
     elseif ARGS[i] == "--n" && i < length(ARGS)
-        n_samples = parse(Int, ARGS[i+1])
+        global n_samples = parse(Int, ARGS[i+1])
     end
 end
 
@@ -40,6 +40,8 @@ elseif mode == "cutile"
 else
     error("Unknown mode: $mode. Use: cutile, nocutile, no_overrides")
 end
+
+t_wall_start = time()
 
 # ── Now activate and load packages ──
 using Pkg
@@ -124,6 +126,10 @@ output_dir = joinpath(@__DIR__, "..", "test", "samples_branching_gpu_test_$(mode
 mkpath(output_dir)
 println("Output dir: $output_dir")
 
+t_load_done = time()
+load_time = t_load_done - t_wall_start
+println("Load/compile time: $(round(load_time, digits=1))s")
+
 latent_dim = 8
 
 # Cosine time schedule
@@ -135,8 +141,14 @@ nsteps = length(steps) - 1
 println("Steps: $nsteps (cosine schedule)")
 println()
 
+# Timing accumulators
+sample_times = Float64[]          # generation time per sample
+decode_times = Float64[]          # decode+save time per sample
+sample_lengths = Int[]            # final lengths
+sample_status = String[]          # "ok" or "FAILED"
+
 for sample_idx in 1:n_samples
-    println("--- Sample $sample_idx ---")
+    println("--- Sample $sample_idx/$n_samples ---")
 
     initial_length = max(1, rand(Poisson(100)))
 
@@ -150,8 +162,9 @@ for sample_idx in 1:n_samples
     X0 = create_initial_state(P_ca, P_ll, initial_length, latent_dim)
 
     Xt = X0
-    t_start = time()
+    t_gen_start = time()
     errored = false
+    last_step = 0
     for i in 1:nsteps
         t1, t2 = steps[i], steps[i+1]
         local hat
@@ -163,16 +176,22 @@ for sample_idx in 1:n_samples
             break
         end
         Xt = Flowfusion.step(P, Xt, hat, t1, t2)
+        last_step = i
 
         L_current = size(Xt.groupings, 1)
         if i % 100 == 0
-            println("  Step $i/$nsteps: t=$(round(t2, digits=3)), L=$L_current")
+            step_elapsed = time() - t_gen_start
+            println("  Step $i/$nsteps: t=$(round(t2, digits=3)), L=$L_current, elapsed=$(round(step_elapsed, digits=1))s")
         end
     end
-    elapsed = time() - t_start
+    gen_elapsed = time() - t_gen_start
 
     if errored
-        println("  FAILED after $(round(elapsed, digits=1))s")
+        push!(sample_times, gen_elapsed)
+        push!(decode_times, 0.0)
+        push!(sample_lengths, -1)
+        push!(sample_status, "FAILED@step$last_step")
+        println("  FAILED after $(round(gen_elapsed, digits=1))s at step $last_step")
         println()
         continue
     end
@@ -184,7 +203,7 @@ for sample_idx in 1:n_samples
     latents = dropdims(ll_tensor, dims=3)
     final_L = size(ca_coords, 2)
 
-    println("  Final length: $final_L (started at $initial_length), time: $(round(elapsed, digits=1))s")
+    println("  Generated: L=$initial_length -> $final_L in $(round(gen_elapsed, digits=1))s ($(round(gen_elapsed/nsteps*1000, digits=1))ms/step)")
 
     # CA-CA distances
     dists = [sqrt(sum((ca_coords[:, i+1] .- ca_coords[:, i]).^2)) for i in 1:(final_L-1)]
@@ -192,6 +211,7 @@ for sample_idx in 1:n_samples
     println("  Mean CA-CA: $(round(mean_d, digits=3)) nm")
 
     # Decode and save
+    t_dec_start = time()
     ca_3d = reshape(ca_coords, 3, final_L, 1)
     ll_3d = reshape(latents, latent_dim, final_L, 1)
     mask = ones(Float32, final_L, 1)
@@ -209,13 +229,40 @@ for sample_idx in 1:n_samples
     )
 
     samples_to_pdb(samples, output_dir; prefix="$(mode)_$sample_idx", save_all_atom=true)
+    dec_elapsed = time() - t_dec_start
 
     aatype = dec_out[:aatype_max][:, 1]
     seq = join([index_to_aa(aa) for aa in aatype])
-    println("  Sequence: $(seq[1:min(40, length(seq))])...")
+    println("  Decoded+saved in $(round(dec_elapsed, digits=1))s | Seq: $(seq[1:min(40, length(seq))])...")
     println()
+
+    push!(sample_times, gen_elapsed)
+    push!(decode_times, dec_elapsed)
+    push!(sample_lengths, final_L)
+    push!(sample_status, "ok")
 end
 
+total_time = time() - t_wall_start
+gen_total = sum(sample_times)
+dec_total = sum(decode_times)
+n_ok = count(==("ok"), sample_status)
+
 println("=" ^ 70)
-println("Mode: $mode | Samples saved to: $output_dir")
+println("TIMING SUMMARY — mode: $mode")
+println("=" ^ 70)
+println("  Load/compile:  $(round(load_time, digits=1))s")
+println("  Generation:    $(round(gen_total, digits=1))s total, $(n_ok > 0 ? round(gen_total/n_ok, digits=1) : "N/A")s/sample avg")
+println("  Decode+save:   $(round(dec_total, digits=1))s total")
+println("  Wall clock:    $(round(total_time, digits=1))s")
+println()
+println("  Per-sample breakdown:")
+for i in 1:length(sample_times)
+    st = sample_status[i]
+    L = sample_lengths[i]
+    gt = round(sample_times[i], digits=1)
+    dt = round(decode_times[i], digits=1)
+    println("    #$i: gen=$(gt)s, decode=$(dt)s, L=$L, status=$st")
+end
+println()
+println("Samples saved to: $output_dir")
 println("=" ^ 70)
