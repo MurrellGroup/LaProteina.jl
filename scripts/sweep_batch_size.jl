@@ -60,47 +60,63 @@ ll_loss_scale = 0.1f0
 const TILE_SIZE = 64
 batch_sizes = [4, 6, 8, 10, 12, 16, 20, 24, 28, 32]
 
-println("=" ^ 70)
-println("Batch Size Sweep — Per-Sample Efficiency")
-println("=" ^ 70)
-println("Batch sizes: $batch_sizes")
-println("Batches per size: $n_batches_per_size")
-println("cuTile available: $(LaProteina._HAS_CUTILE)")
-println("No overrides: $(LaProteina._NO_OVERRIDES)")
-println("Tile padding: $TILE_SIZE")
+# ============================================================================
+# Log file — explicitly flushed so we can always read progress
+# ============================================================================
+gpu_path_name = LaProteina._NO_OVERRIDES ? "no_overrides" : (LaProteina._HAS_CUTILE ? "cutile" : "nocutile")
+log_path = joinpath(@__DIR__, "..", "sweep_$(gpu_path_name)_$(Dates.format(now(), "yyyymmdd_HHMMSS")).log")
+const LOG_IO = open(log_path, "w")
+
+"""Print to both stdout and the log file (flushed immediately)."""
+function logprintln(args...)
+    println(args...)
+    println(LOG_IO, args...)
+    flush(LOG_IO)
+end
+
+
+logprintln("=" ^ 70)
+logprintln("Batch Size Sweep — Per-Sample Efficiency")
+logprintln("=" ^ 70)
+logprintln("Log file: $log_path")
+logprintln("Batch sizes: $batch_sizes")
+logprintln("Batches per size: $n_batches_per_size")
+logprintln("cuTile available: $(LaProteina._HAS_CUTILE)")
+logprintln("No overrides: $(LaProteina._NO_OVERRIDES)")
+logprintln("Tile padding: $TILE_SIZE")
 
 # ============================================================================
 # GPU Check
 # ============================================================================
-println("\n=== GPU Status ===")
+logprintln("\n=== GPU Status ===")
 @assert CUDA.functional() "CUDA not functional!"
-println("Device: $(CUDA.device())")
-println("Memory: $(round(CUDA.available_memory() / 1e9, digits=2)) GB available")
+logprintln("Device: $(CUDA.device())")
+logprintln("Memory: $(round(CUDA.available_memory() / 1e9, digits=2)) GB available")
 LaProteina.enable_tf32!()
-println("TF32 math mode: $(CUDA.math_mode())")
+logprintln("TF32 math mode: $(CUDA.math_mode())")
 dev = gpu
 
 # ============================================================================
 # Load Data
 # ============================================================================
-println("\n=== Loading Data ===")
+logprintln("\n=== Loading Data ===")
 shard_files = filter(f -> startswith(f, "train_shard_") && endswith(f, ".jld2"), readdir(shard_dir))
 sort!(shard_files)
-println("Found $(length(shard_files)) shard files")
+logprintln("Found $(length(shard_files)) shard files")
 
 all_proteins = []
 for (shard_idx, shard_file) in enumerate(shard_files)
     shard_path = joinpath(shard_dir, shard_file)
     proteins = load_precomputed_shard(shard_path)
     append!(all_proteins, proteins)
-    println("  Shard $shard_idx: $(length(proteins)) proteins (total: $(length(all_proteins)))")
+    logprintln("  Shard $shard_idx: $(length(proteins)) proteins (total: $(length(all_proteins)))")
 end
-println("Total proteins: $(length(all_proteins))")
+logprintln("Total proteins: $(length(all_proteins))")
 
 # ============================================================================
 # Create Model (once)
 # ============================================================================
-println("\n=== Creating Model ===")
+logprintln("\n=== Creating Model ===")
 base = ScoreNetwork(
     n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
     dim_cond=256, latent_dim=latent_dim, output_param=:v,
@@ -114,7 +130,7 @@ load_branching_weights!(model, indel_weights_path; base_weights_path=base_weight
 
 base_model_cpu = deepcopy(model.base)
 model = dev(model)
-println("Model loaded and on GPU")
+logprintln("Model loaded and on GPU")
 
 # ============================================================================
 # Optimizer (once — same as train_branching_full.jl)
@@ -304,20 +320,20 @@ end
 # ============================================================================
 # Sweep: single continuous training loop, switching batch size periodically
 # ============================================================================
-println("\n=== Starting Batch Size Sweep ===\n")
+logprintln("\n=== Starting Batch Size Sweep ===\n")
 
 results = NamedTuple[]
 
 global_batch_idx = 0
 
 for bs in batch_sizes
-    println("-" ^ 50)
-    println("Batch size: $bs")
-    println("-" ^ 50)
+    logprintln("-" ^ 50)
+    logprintln("Batch size: $bs")
+    logprintln("-" ^ 50)
 
     GC.gc()
     CUDA.reclaim()
-    println("  GPU memory available: $(round(CUDA.available_memory() / 1e9, digits=2)) GB")
+    logprintln("  GPU memory available: $(round(CUDA.available_memory() / 1e9, digits=2)) GB")
 
     # New DataLoader for this batch size
     batch_indices_bs = [rand(1:length(all_proteins), bs) for _ in 1:n_batches_per_size]
@@ -408,18 +424,17 @@ for bs in batch_sizes
 
             loss_val = Float32(cpu(loss))
             if batch_idx <= 3 || batch_idx % 10 == 0
-                @printf("  Batch %3d (global %d): loss=%.3f, lr=%.2e, time=%.0f ms (gpu=%.0f ms, %.1f ms/sample), L=%d\n",
-                        batch_idx, global_batch_idx, loss_val, sched.lr, batch_time, gpu_time, batch_time / bs, L_batch)
+                logprintln("  Batch $batch_idx (global $global_batch_idx): loss=$(round(loss_val, digits=3)), lr=$(@sprintf("%.2e", sched.lr)), time=$(round(Int, batch_time)) ms (gpu=$(round(Int, gpu_time)) ms, $(round(batch_time/bs, digits=1)) ms/sample), L=$L_batch")
             end
 
             # Bail early if model has gone NaN
             if !isfinite(loss_val)
-                println("  WARNING: NaN/Inf loss at batch $(batch_idx), model may have diverged")
+                logprintln("  WARNING: NaN/Inf loss at batch $(batch_idx), model may have diverged")
             end
 
         catch e
             if isa(e, CUDA.OutOfMemoryError) || (isa(e, ErrorException) && occursin("out of memory", string(e)))
-                println("  OOM at batch $(batch_idx)! Stopping this batch size.")
+                logprintln("  OOM at batch $(batch_idx)! Stopping this batch size.")
                 oom = true
                 GC.gc()
                 CUDA.reclaim()
@@ -453,14 +468,13 @@ for bs in batch_sizes
             n_completed = n_done
         ))
 
-        @printf("  => BS=%d: total median=%.0f ms (gpu=%.0f ms), per-sample=%.1f ms, avg_L=%d (%d/%d batches)\n",
-                bs, med, gpu_med, med / bs, avg_L, n_done, n_batches_per_size)
+        logprintln("  => BS=$bs: total median=$(round(Int, med)) ms (gpu=$(round(Int, gpu_med)) ms), per-sample=$(round(med/bs, digits=1)) ms, avg_L=$avg_L ($n_done/$n_batches_per_size batches)")
     else
-        println("  => BS=$bs: No batches completed (OOM on first batch)")
+        logprintln("  => BS=$bs: No batches completed (OOM on first batch)")
     end
 
     if oom
-        println("\nStopping sweep — OOM at batch size $bs")
+        logprintln("\nStopping sweep — OOM at batch size $bs")
         break
     end
 end
@@ -468,37 +482,33 @@ end
 # ============================================================================
 # Summary Table
 # ============================================================================
-println("\n" * "=" ^ 70)
-println("BATCH SIZE SWEEP RESULTS")
-println("=" ^ 70)
-println("GPU path: $(LaProteina._NO_OVERRIDES ? "original (no overrides)" : (LaProteina._HAS_CUTILE ? "cuTile" : "nocutile"))")
-println("TF32: enabled")
-println("Batches per size: $n_batches_per_size (first excluded from stats)")
-println("Total training batches: $global_batch_idx")
-println("Final LR: $(sched.lr)")
-println()
+logprintln("\n" * "=" ^ 70)
+logprintln("BATCH SIZE SWEEP RESULTS")
+logprintln("=" ^ 70)
+logprintln("GPU path: $(LaProteina._NO_OVERRIDES ? "original (no overrides)" : (LaProteina._HAS_CUTILE ? "cuTile" : "nocutile"))")
+logprintln("TF32: enabled")
+logprintln("Batches per size: $n_batches_per_size (first excluded from stats)")
+logprintln("Total training batches: $global_batch_idx")
+logprintln("Final LR: $(sched.lr)")
+logprintln()
 
-@printf("%-6s  %-10s  %-10s  %-10s  %-12s  %-12s  %-6s  %-9s\n",
-        "BS", "Total(ms)", "GPU(ms)", "Prep(ms)", "/samp(ms)", "GPU/samp", "AvgL", "Done")
-@printf("%-6s  %-10s  %-10s  %-10s  %-12s  %-12s  %-6s  %-9s\n",
-        "------", "----------", "----------", "----------", "------------", "------------", "------", "---------")
+logprintln("BS      Total(ms)  GPU(ms)    Prep(ms)   /samp(ms)   GPU/samp    AvgL   Done")
+logprintln("------  ---------  ---------  ---------  ----------  ----------  -----  ---------")
 
 best_per_sample = Inf
 best_bs = 0
 for r in results
     prep_med = r.median_ms - r.gpu_median_ms
-    @printf("%-6d  %-10.0f  %-10.0f  %-10.0f  %-12.1f  %-12.1f  %-6d  %d/%d\n",
-            r.batch_size, r.median_ms, r.gpu_median_ms, prep_med,
-            r.per_sample_median, r.gpu_median_ms / r.batch_size,
-            r.avg_seq_len, r.n_completed, n_batches_per_size)
+    logprintln("$(lpad(r.batch_size,6))  $(lpad(round(Int,r.median_ms),9))  $(lpad(round(Int,r.gpu_median_ms),9))  $(lpad(round(Int,prep_med),9))  $(lpad(round(r.per_sample_median,digits=1),10))  $(lpad(round(r.gpu_median_ms/r.batch_size,digits=1),10))  $(lpad(r.avg_seq_len,5))  $(r.n_completed)/$n_batches_per_size")
     if r.per_sample_median < best_per_sample
         best_per_sample = r.per_sample_median
         best_bs = r.batch_size
     end
 end
 
-println()
-@printf("Best per-sample efficiency: BS=%d at %.1f ms/sample (median total)\n", best_bs, best_per_sample)
-println("\nNote: Prep(ms) = Total - GPU = time waiting for DataLoader (batch prep on CPU)")
-println("If Prep >> GPU, the data loader is the bottleneck.")
-println("\nDone!")
+logprintln()
+logprintln("Best per-sample efficiency: BS=$best_bs at $(round(best_per_sample, digits=1)) ms/sample (median total)")
+logprintln("\nNote: Prep(ms) = Total - GPU = time waiting for DataLoader (batch prep on CPU)")
+logprintln("If Prep >> GPU, the data loader is the bottleneck.")
+logprintln("\nDone!")
+close(LOG_IO)
