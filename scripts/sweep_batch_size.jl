@@ -57,6 +57,7 @@ deletion_pad = 1.1
 ca_loss_scale = 2.0f0
 ll_loss_scale = 0.1f0
 
+const TILE_SIZE = 64
 batch_sizes = [4, 6, 8, 10, 12, 16, 20, 24, 28, 32]
 
 println("=" ^ 70)
@@ -66,6 +67,7 @@ println("Batch sizes: $batch_sizes")
 println("Batches per size: $n_batches_per_size")
 println("cuTile available: $(LaProteina._HAS_CUTILE)")
 println("No overrides: $(LaProteina._NO_OVERRIDES)")
+println("Tile padding: $TILE_SIZE")
 
 # ============================================================================
 # GPU Check
@@ -173,7 +175,48 @@ function protein_to_X1_simple(protein)
     )
 end
 
-function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_model)
+"""Pad all batch tensors so seq_len is a multiple of `pad_to`. No-op when already aligned."""
+function pad_batch_to(bd, pad_to::Int)
+    pad_to <= 0 && return bd
+    L = size(bd.mask, 1)
+    rem = L % pad_to
+    rem == 0 && return bd
+    pad_len = pad_to - rem
+    L_new = L + pad_len
+    B = size(bd.mask, 2)
+
+    pad3(x) = cat(x, zeros(Float32, size(x,1), pad_len, size(x,3)); dims=2)
+    pad2(x) = cat(x, zeros(Float32, pad_len, B); dims=1)
+    function pad4_pair(x)
+        x2 = cat(x, zeros(Float32, size(x,1), pad_len, size(x,3), B); dims=2)
+        cat(x2, zeros(Float32, size(x2,1), L_new, pad_len, B); dims=3)
+    end
+
+    rf = bd.raw_features
+    new_rf = LaProteina.ScoreNetworkRawFeatures(
+        pad3(rf.seq_raw), pad3(rf.cond_raw),
+        pad4_pair(rf.pair_raw), pad4_pair(rf.pair_cond_raw),
+        pad2(rf.mask)
+    )
+
+    new_cpu_batch = Dict{Symbol, Any}(
+        :x_t => Dict(:bb_ca => pad3(bd.cpu_batch[:x_t][:bb_ca]),
+                      :local_latents => pad3(bd.cpu_batch[:x_t][:local_latents])),
+        :t => bd.cpu_batch[:t],
+        :mask => pad2(bd.cpu_batch[:mask])
+    )
+
+    return (
+        raw_features = new_rf, cpu_batch = new_cpu_batch,
+        xt_ca = pad3(bd.xt_ca), xt_ll = pad3(bd.xt_ll),
+        mask = pad2(bd.mask), combined_mask = pad2(bd.combined_mask),
+        x1_ca_target = pad3(bd.x1_ca_target), x1_ll_target = pad3(bd.x1_ll_target),
+        split_target = pad2(bd.split_target), del_target = pad2(bd.del_target),
+        t_vec = bd.t_vec, t_ca = bd.t_ca, t_ll = bd.t_ll
+    )
+end
+
+function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_model; pad_to::Int=0)
     X1s = [protein_to_X1_simple(proteins_ref[i]) for i in indices]
 
     t_dist = Uniform(0f0, 1f0)
@@ -225,7 +268,7 @@ function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_m
 
     raw_features = extract_raw_features(base_model, cpu_batch)
 
-    return (
+    bd = (
         raw_features = raw_features,
         cpu_batch = cpu_batch,
         xt_ca = xt_ca_cpu,
@@ -240,6 +283,8 @@ function prepare_training_batch(indices, proteins_ref, P_ref, X0_sampler, base_m
         t_ca = t_ca_cpu,
         t_ll = t_ll_cpu
     )
+
+    return pad_batch_to(bd, pad_to)
 end
 
 # BatchDataset struct
@@ -248,11 +293,12 @@ struct BatchDataset{P, S, M}
     proteins::P
     process::S
     base_model::M
+    pad_to::Int
 end
 
 Base.length(x::BatchDataset) = length(x.batch_indices)
 function Base.getindex(x::BatchDataset, i::Int)
-    prepare_training_batch(x.batch_indices[i], x.proteins, x.process, X0_sampler_train, x.base_model)
+    prepare_training_batch(x.batch_indices[i], x.proteins, x.process, X0_sampler_train, x.base_model; pad_to=x.pad_to)
 end
 
 # ============================================================================
@@ -260,7 +306,7 @@ end
 # ============================================================================
 println("\n=== Starting Batch Size Sweep ===\n")
 
-results = Vector{NamedTuple{(:batch_size, :median_ms, :mean_ms, :per_sample_median, :per_sample_mean, :n_completed), Tuple{Int, Float64, Float64, Float64, Float64, Int}}}()
+results = NamedTuple[]
 
 global_batch_idx = 0
 
@@ -275,10 +321,12 @@ for bs in batch_sizes
 
     # New DataLoader for this batch size
     batch_indices_bs = [rand(1:length(all_proteins), bs) for _ in 1:n_batches_per_size]
-    dataset_bs = BatchDataset(batch_indices_bs, all_proteins, P, base_model_cpu)
+    dataset_bs = BatchDataset(batch_indices_bs, all_proteins, P, base_model_cpu, TILE_SIZE)
     dataloader_bs = Flux.DataLoader(dataset_bs; batchsize=-1, parallel=true)
 
     batch_times_bs = Float64[]
+    gpu_times_bs = Float64[]  # GPU-only time (transfer + fwd + bwd + optim)
+    seq_lens_bs = Int[]
     oom = false
 
     for (batch_idx, bd_cpu) in enumerate(dataloader_bs)
@@ -286,8 +334,11 @@ for bs in batch_sizes
         t_batch = time()
 
         try
+            t_gpu_start = time()
             bd = dev(bd_cpu)
             raw_features_for_training = dev(bd.raw_features)
+            L_batch = size(bd.mask, 1)
+            push!(seq_lens_bs, L_batch)
 
             # Self-conditioning (1 pass)
             out_sc = forward_branching_from_raw_features_gpu(model, raw_features_for_training)
@@ -343,6 +394,9 @@ for bs in batch_sizes
             end
 
             Flux.update!(opt_state, model, grads[1])
+            CUDA.synchronize()
+            gpu_time = (time() - t_gpu_start) * 1000
+            push!(gpu_times_bs, gpu_time)
 
             # LR schedule: adjust every 10 global batches (matching original)
             if global_batch_idx % 10 == 0
@@ -354,8 +408,8 @@ for bs in batch_sizes
 
             loss_val = Float32(cpu(loss))
             if batch_idx <= 3 || batch_idx % 10 == 0
-                @printf("  Batch %3d (global %d): loss=%.3f, lr=%.2e, time=%.0f ms (%.1f ms/sample)\n",
-                        batch_idx, global_batch_idx, loss_val, sched.lr, batch_time, batch_time / bs)
+                @printf("  Batch %3d (global %d): loss=%.3f, lr=%.2e, time=%.0f ms (gpu=%.0f ms, %.1f ms/sample), L=%d\n",
+                        batch_idx, global_batch_idx, loss_val, sched.lr, batch_time, gpu_time, batch_time / bs, L_batch)
             end
 
             # Bail early if model has gone NaN
@@ -379,21 +433,28 @@ for bs in batch_sizes
     if !isempty(batch_times_bs)
         # Skip first batch (warmup for new batch size shape)
         times = length(batch_times_bs) > 1 ? batch_times_bs[2:end] : batch_times_bs
+        gpu_t = length(gpu_times_bs) > 1 ? gpu_times_bs[2:end] : gpu_times_bs
         med = median(times)
         avg = mean(times)
+        gpu_med = median(gpu_t)
+        gpu_avg = mean(gpu_t)
+        avg_L = isempty(seq_lens_bs) ? 0 : round(Int, mean(seq_lens_bs))
         n_done = length(batch_times_bs)
 
         push!(results, (
             batch_size = bs,
             median_ms = med,
             mean_ms = avg,
+            gpu_median_ms = gpu_med,
+            gpu_mean_ms = gpu_avg,
             per_sample_median = med / bs,
             per_sample_mean = avg / bs,
+            avg_seq_len = avg_L,
             n_completed = n_done
         ))
 
-        @printf("  => BS=%d: median=%.0f ms, mean=%.0f ms, per-sample: median=%.1f ms, mean=%.1f ms (%d/%d batches)\n",
-                bs, med, avg, med / bs, avg / bs, n_done, n_batches_per_size)
+        @printf("  => BS=%d: total median=%.0f ms (gpu=%.0f ms), per-sample=%.1f ms, avg_L=%d (%d/%d batches)\n",
+                bs, med, gpu_med, med / bs, avg_L, n_done, n_batches_per_size)
     else
         println("  => BS=$bs: No batches completed (OOM on first batch)")
     end
@@ -417,18 +478,19 @@ println("Total training batches: $global_batch_idx")
 println("Final LR: $(sched.lr)")
 println()
 
-@printf("%-6s  %-10s  %-10s  %-14s  %-14s  %-9s\n",
-        "BS", "Med (ms)", "Mean (ms)", "Med/samp (ms)", "Mean/samp (ms)", "Completed")
-@printf("%-6s  %-10s  %-10s  %-14s  %-14s  %-9s\n",
-        "------", "----------", "----------", "--------------", "--------------", "---------")
+@printf("%-6s  %-10s  %-10s  %-10s  %-12s  %-12s  %-6s  %-9s\n",
+        "BS", "Total(ms)", "GPU(ms)", "Prep(ms)", "/samp(ms)", "GPU/samp", "AvgL", "Done")
+@printf("%-6s  %-10s  %-10s  %-10s  %-12s  %-12s  %-6s  %-9s\n",
+        "------", "----------", "----------", "----------", "------------", "------------", "------", "---------")
 
 best_per_sample = Inf
 best_bs = 0
 for r in results
-    @printf("%-6d  %-10.0f  %-10.0f  %-14.1f  %-14.1f  %d/%d\n",
-            r.batch_size, r.median_ms, r.mean_ms,
-            r.per_sample_median, r.per_sample_mean,
-            r.n_completed, n_batches_per_size)
+    prep_med = r.median_ms - r.gpu_median_ms
+    @printf("%-6d  %-10.0f  %-10.0f  %-10.0f  %-12.1f  %-12.1f  %-6d  %d/%d\n",
+            r.batch_size, r.median_ms, r.gpu_median_ms, prep_med,
+            r.per_sample_median, r.gpu_median_ms / r.batch_size,
+            r.avg_seq_len, r.n_completed, n_batches_per_size)
     if r.per_sample_median < best_per_sample
         best_per_sample = r.per_sample_median
         best_bs = r.batch_size
@@ -436,5 +498,7 @@ for r in results
 end
 
 println()
-@printf("Best per-sample efficiency: BS=%d at %.1f ms/sample (median)\n", best_bs, best_per_sample)
+@printf("Best per-sample efficiency: BS=%d at %.1f ms/sample (median total)\n", best_bs, best_per_sample)
+println("\nNote: Prep(ms) = Total - GPU = time waiting for DataLoader (batch prep on CPU)")
+println("If Prep >> GPU, the data loader is the bottleneck.")
 println("\nDone!")
