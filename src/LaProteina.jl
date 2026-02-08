@@ -127,6 +127,7 @@ export
     # Separated feature extraction for training
     ScoreNetworkFeatures, extract_features, forward_from_features,
     ScoreNetworkRawFeatures, extract_raw_features, forward_from_raw_features,
+    compute_sc_feature_offsets, update_sc_raw_features!,
     # Efficient GPU-native forward pass
     EfficientScoreNetworkBatch, forward_efficient, to_efficient_batch,
     compute_time_embedding_gpu, compute_pairwise_distances_gpu,

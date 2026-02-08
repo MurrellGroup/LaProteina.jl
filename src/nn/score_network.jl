@@ -348,6 +348,73 @@ function extract_raw_features(model::ScoreNetwork, batch::Dict)
 end
 
 """
+    compute_sc_feature_offsets(model::ScoreNetwork)
+
+Compute the byte offsets of self-conditioning features within raw feature tensors.
+Returns (seq_offsets, pair_offsets) where each is a vector of (start, stop, feature_type)
+tuples for the SC-related features.
+
+Only needs to be called once per model — cache the result.
+"""
+function compute_sc_feature_offsets(model::ScoreNetwork)
+    # Sequence features: find XscBBCAFeature and XscLocalLatentsFeature
+    seq_offsets = Tuple{Int,Int,Symbol}[]
+    offset = 0
+    for f in model.init_repr_factory.features
+        d = get_dim(f)
+        if f isa XscBBCAFeature
+            push!(seq_offsets, (offset + 1, offset + d, :bb_ca))
+        elseif f isa XscLocalLatentsFeature
+            push!(seq_offsets, (offset + 1, offset + d, :local_latents))
+        end
+        offset += d
+    end
+
+    # Pair features: find XscBBCAPairDistFeature
+    pair_offsets = Tuple{Int,Int,Float32,Float32,Int}[]
+    offset = 0
+    for f in model.pair_rep_builder.init_repr_factory.features
+        d = get_dim(f)
+        if f isa XscBBCAPairDistFeature
+            push!(pair_offsets, (offset + 1, offset + d, f.min_dist, f.max_dist, d))
+        end
+        offset += d
+    end
+
+    return (seq=seq_offsets, pair=pair_offsets)
+end
+
+"""
+    update_sc_raw_features!(raw_features, sc_offsets, x_sc_bb_ca, x_sc_local_latents)
+
+In-place update of self-conditioning channels in raw features.
+Operates directly on GPU tensors — no CPU round-trip needed.
+
+`sc_offsets` should come from `compute_sc_feature_offsets(model)`.
+`x_sc_bb_ca` is [3, L, B] and `x_sc_local_latents` is [D, L, B], both on GPU.
+"""
+function update_sc_raw_features!(raw_features::ScoreNetworkRawFeatures,
+                                  sc_offsets,
+                                  x_sc_bb_ca, x_sc_local_latents)
+    # Update sequence features
+    for (start, stop, ftype) in sc_offsets.seq
+        if ftype == :bb_ca
+            raw_features.seq_raw[start:stop, :, :] .= x_sc_bb_ca
+        elseif ftype == :local_latents
+            raw_features.seq_raw[start:stop, :, :] .= x_sc_local_latents
+        end
+    end
+
+    # Update pair features (binned pairwise distances from SC CA coords)
+    for (start, stop, min_dist, max_dist, n_bins) in sc_offsets.pair
+        sc_pair_dists = bin_pairwise_distances(x_sc_bb_ca, min_dist, max_dist, n_bins)
+        raw_features.pair_raw[start:stop, :, :, :] .= sc_pair_dists
+    end
+
+    return raw_features
+end
+
+"""
     forward_from_raw_features(model::ScoreNetwork, raw_features::ScoreNetworkRawFeatures)
 
 Run full forward pass from raw (unprojected) features.
