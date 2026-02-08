@@ -729,7 +729,11 @@ println("Copied to: $copy_path")
 
 # Generate final samples
 println("\n=== Generating Final Samples ===")
-generate_and_save_samples(model, decoder, output_dir, n_batches, 0; n_samples=5, dev=dev)
+try
+    generate_and_save_samples(model, decoder, output_dir, n_batches, 0; n_samples=5, dev=dev)
+catch e
+    println("  Final sampling failed: ", typeof(e), " — model may have NaN weights")
+end
 
 println("\nLog file: $log_file")
 println("Output directory: $output_dir")
