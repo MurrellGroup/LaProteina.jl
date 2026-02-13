@@ -201,16 +201,17 @@ opt_state = Flux.setup(Muon(eta=sched.lr), model)
 println("Optimizer: Muon with burnin_learning_schedule")
 
 # ============================================================================
-# Create Decoder for Sampling
+# Create Decoder for Sampling (DISABLED — sampling causes CUDA illegal memory
+# access, suspected flash attention bug with non-tile-aligned sequence lengths)
 # ============================================================================
-println("\n=== Creating Decoder for Sampling ===")
-decoder = DecoderTransformer(
-    n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
-    dim_cond=128, latent_dim=latent_dim, qk_ln=true, update_pair_repr=false
-)
-decoder_weights_path = joinpath(weights_dir, "decoder.npz")
-load_decoder_weights!(decoder, decoder_weights_path)
-println("Decoder loaded (kept on CPU for sampling)")
+# println("\n=== Creating Decoder for Sampling ===")
+# decoder = DecoderTransformer(
+#     n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
+#     dim_cond=128, latent_dim=latent_dim, qk_ln=true, update_pair_repr=false
+# )
+# decoder_weights_path = joinpath(weights_dir, "decoder.npz")
+# load_decoder_weights!(decoder, decoder_weights_path)
+# println("Decoder loaded (kept on CPU for sampling)")
 
 # ============================================================================
 # Create Branching Flow Process
@@ -666,14 +667,16 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
     end
 
     # Generate samples at batch 1 and every sample_every batches thereafter
+    # DISABLED: sampling causes CUDA illegal memory access (suspected flash
+    # attention bug with non-tile-aligned sequence lengths during inference)
     if batch_idx == 1 || batch_idx % sample_every == 0
-        try
-            generate_and_save_samples(model, decoder, output_dir, batch_idx, shard_idx; dev=dev)
-        catch e
-            println("  Sampling failed at batch $batch_idx: ", typeof(e), " — skipping")
-        end
+        #try
+        #    generate_and_save_samples(model, decoder, output_dir, batch_idx, shard_idx; dev=dev)
+        #catch e
+        #    println("  Sampling failed at batch $batch_idx: ", typeof(e), " — skipping")
+        #end
 
-        # Also save checkpoint
+        # Save checkpoint (still active)
         checkpoint_path = joinpath(output_dir, "checkpoints", @sprintf("checkpoint_batch%06d.jld2", batch_idx))
         model_cpu = cpu(model)
         save_branching_weights(model_cpu, checkpoint_path; include_base=true)
@@ -720,13 +723,13 @@ copy_path = joinpath(weights_dir, "branching_full.jld2")
 cp(final_path, copy_path; force=true)
 println("Copied to: $copy_path")
 
-# Generate final samples
-println("\n=== Generating Final Samples ===")
-try
-    generate_and_save_samples(model, decoder, output_dir, n_batches, 0; n_samples=5, dev=dev)
-catch e
-    println("  Final sampling failed: ", typeof(e), " — model may have NaN weights")
-end
+# Generate final samples (DISABLED — see sampling bug note above)
+# println("\n=== Generating Final Samples ===")
+# try
+#     generate_and_save_samples(model, decoder, output_dir, n_batches, 0; n_samples=5, dev=dev)
+# catch e
+#     println("  Final sampling failed: ", typeof(e), " — model may have NaN weights")
+# end
 
 println("\nLog file: $log_file")
 println("Output directory: $output_dir")

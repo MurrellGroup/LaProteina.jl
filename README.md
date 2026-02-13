@@ -394,6 +394,10 @@ The package includes custom CUDA kernels (cuTile flash attention, fused LayerNor
 
 This package uses `PyTorchLayerNorm` which computes `sqrt(var + eps)` instead of Flux's `sqrt(var + eps^2)`. This is critical for numerical parity.
 
+## Known Issues
+
+**Sampling crash with cuTile flash attention**: `generate_with_branching` can trigger a `CUDA error: illegal memory access` during inference, which corrupts the CUDA context and kills the process. Suspected cause: cuTile flash attention kernels receiving sequence lengths that are not aligned to the tile width (64). Branching inference produces variable-length sequences that may not be properly tile-padded. Sampling is currently disabled in the training script. Fixed-length generation (where lengths are explicitly padded) is not affected.
+
 ## Numerical Parity
 
 The implementation has been verified against the Python reference:
