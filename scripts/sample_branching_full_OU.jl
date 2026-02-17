@@ -35,6 +35,7 @@ println("Device: $(CUDA.functional() ? "GPU" : "CPU")")
 
 # Load model with full fine-tuned weights
 weights_dir = joinpath(@__DIR__, "..", "weights")
+safe_models_dir = get(ENV, "SAFE_MODELS_DIR", "/home/claudey/safe_models")
 base = ScoreNetwork(
     n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
     dim_cond=256, latent_dim=8, output_param=:v,
@@ -43,7 +44,9 @@ base = ScoreNetwork(
 model = BranchingScoreNetwork(base)
 
 # Load the fully fine-tuned weights (includes base)
-full_weights_path = joinpath(weights_dir, "branching_full.jld2")
+# Prefer safe_models dir (validated weights), fall back to weights dir
+safe_weights_path = joinpath(safe_models_dir, "branching_OU_100k_20260216.jld2")
+full_weights_path = isfile(safe_weights_path) ? safe_weights_path : joinpath(weights_dir, "branching_full.jld2")
 println("Loading weights from: $full_weights_path")
 weights = load(full_weights_path)
 if haskey(weights, "base")

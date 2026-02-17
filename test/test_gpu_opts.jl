@@ -18,12 +18,7 @@ println("   TF32 enabled: ", CUDA.math_mode())
 println("\n2. within_gradient:")
 println("   Direct call: ", LaProteina.within_gradient(1.0))
 
-# Test 3: Buffer pool
-println("\n3. Buffer pool:")
-buf = LaProteina._get_perm_buf(1, (64, 128, 12, 4))
-println("   Buffer shape: ", size(buf))
-buf2 = LaProteina._get_perm_buf(1, (64, 128, 12, 4))
-println("   Same buffer: ", pointer(buf) == pointer(buf2))
+# Test 3: (Buffer pool removed — was causing CUDA error 700 with variable-length sampling)
 
 # Test 4: PyTorchLayerNorm on GPU
 println("\n4. PyTorchLayerNorm on GPU:")

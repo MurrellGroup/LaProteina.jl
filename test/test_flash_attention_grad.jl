@@ -13,14 +13,15 @@ using NNlib: softmax, batched_mul, batched_transpose
 using Statistics
 using Printf
 
-# Load LaProteina (with cuTile if available)
+# Load LaProteina (with OnionTile if available)
 using LaProteina
+using Onion
 
-println("cuTile available: ", LaProteina._HAS_CUTILE)
+println("OnionTile available: ", LaProteina._HAS_ONIONTILE)
 println("No overrides: ", LaProteina._NO_OVERRIDES)
 
-if !LaProteina._HAS_CUTILE
-    error("This test requires cuTile. Run without LAPROTEINA_NOCUTILE.")
+if !LaProteina._HAS_ONIONTILE
+    error("This test requires OnionTile (cuTile kernels). Run without LAPROTEINA_NOCUTILE.")
 end
 
 LaProteina.enable_tf32!()
@@ -276,13 +277,13 @@ function test_layernorm_grad(; C=768, L=128, B=4)
     eps = 1f-5
     dy = CUDA.randn(Float32, C, L, B)
 
-    # cuTile dispatch path
-    function cutile_loss(x, w, b)
-        y = LaProteina.layernorm_forward(x, w, b, eps)
+    # Onion dispatch path (layernorm_first_forward → OnionTile fused kernel)
+    function dispatch_loss(x, w, b)
+        y = Onion.layernorm_first_forward(x, w, b; eps=eps)
         return sum(y .* dy)
     end
 
-    grads_cutile = Zygote.gradient(cutile_loss, x, w, b)
+    grads_cutile = Zygote.gradient(dispatch_loss, x, w, b)
 
     # Reference: standard LayerNorm
     function ref_loss(x, w, b)

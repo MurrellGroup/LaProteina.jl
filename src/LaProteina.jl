@@ -56,7 +56,7 @@ include("weights.jl")
 # Training utilities
 include("training/precompute_encoder.jl")
 
-# GPU optimization (cuTile kernels, CuArray method overrides)
+# GPU optimization (Onion dispatch hooks → OnionTile cuTile kernels, CuArray method overrides)
 # Must be included after all layer definitions so CuArray methods override defaults
 include("gpu/gpu.jl")
 

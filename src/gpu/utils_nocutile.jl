@@ -1,5 +1,6 @@
-# GPU utility functions (no cuTile dependency)
-# TF32 math mode, within_gradient, buffer pool
+# GPU utility functions
+# TF32 math mode and softmax fix.
+# within_gradient is imported from ONIONop in gpu.jl.
 
 # ============================================================================
 # TF32 Math Mode
@@ -26,34 +27,4 @@ function _fix_softmax_algo!()
     else
         @warn "NNlibCUDACUDNNExt not loaded, cannot fix softmax algo"
     end
-end
-
-# ============================================================================
-# within_gradient: detect AD tracing context
-# ============================================================================
-
-"""
-    within_gradient(x) -> Bool
-
-Returns `false` during normal execution and `true` during Zygote AD tracing.
-Used to guard in-place operations that are NOT AD-compatible.
-"""
-within_gradient(x) = false
-
-function CRC.rrule(::typeof(within_gradient), x)
-    return true, _ -> (NoTangent(), NoTangent())
-end
-
-# ============================================================================
-# Pre-allocated buffer pool
-# ============================================================================
-
-const _perm_buf_pool = Dict{Tuple{Int, Tuple}, CuArray}()
-
-function _get_perm_buf(slot::Int, shape::Tuple)
-    key = (slot, shape)
-    if !haskey(_perm_buf_pool, key)
-        _perm_buf_pool[key] = CUDA.zeros(Float32, shape...)
-    end
-    return _perm_buf_pool[key]
 end

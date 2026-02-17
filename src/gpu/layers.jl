@@ -1,19 +1,21 @@
-# CuArray-specialized forward methods for LaProteina layers (cuTile path).
-# Uses cuTile fused kernels (LayerNorm, Flash Attention), buffer pooling,
-# in-place ops, eager freeing, pre-normalized pair features, and batch-level
-# pair conditioning.
+# CuArray-specialized forward methods for LaProteina layers.
+# Routes through Onion dispatch hooks → OnionTile cuTile kernels:
+#   - layernorm_first_forward → fused LayerNorm
+#   - flash_attention_forward / flash_attention_bias_forward → flash attention
+# Keeps LaProteina-specific optimizations: pre-normalized pairs, in-place
+# residuals, SwiGLU views, batch-level pair conditioning.
 
 using NNlib: softmax, batched_mul, batched_transpose, sigmoid
 
 # ============================================================================
-# PyTorchLayerNorm: fused cuTile kernel via dispatch hooks
+# PyTorchLayerNorm: direct broadcast on CuArray.
+# See docs/layernorm_dispatch.md for why we don't route through Onion dispatch here.
 # ============================================================================
 
 function (ln::PyTorchLayerNorm)(x::CuArray)
+    y = pytorch_normalise(x; dims=1:length(ln.size), eps=ln.ϵ)
     if ln.affine
-        y = layernorm_forward(x, ln.scale, ln.bias, Float32(ln.ϵ))
-    else
-        y = layernorm_noaffine_forward(x, Float32(ln.ϵ))
+        y = y .* ln.scale .+ ln.bias
     end
     return ln.λ(y)
 end
@@ -57,6 +59,7 @@ end
 
 # ============================================================================
 # PairBiasAttention: flash attention with pair bias
+# Single code path for both training and inference (no buffer pool).
 # ============================================================================
 
 function (m::PairBiasAttention)(node_feats::CuArray, pair_feats, mask)
@@ -76,89 +79,27 @@ function (m::PairBiasAttention)(node_feats::CuArray, pair_feats, mask)
     k = m.k_norm(k)
     g = m.to_g(node_feats)
 
-    if within_gradient(node_feats)
-        # Training path: allocating permutedims, dispatch hooks with rrules
-        q = reshape(q, d, h, L, B)
-        k = reshape(k, d, h, L, B)
-        v = reshape(v, d, h, L, B)
-
-        q4 = permutedims(q, (1, 3, 2, 4))
-        k4 = permutedims(k, (1, 3, 2, 4))
-        v4 = permutedims(v, (1, 3, 2, 4))
-
-        # Compute pair bias
-        if !isnothing(pair_feats) && !isnothing(m.pair_norm)
-            pair_normed = m.pair_norm(pair_feats)
-            bias_raw = m.to_bias(pair_normed)  # [h, L, L, B]
-        else
-            bias_raw = nothing
-        end
-
-        attn_out = _flash_attn(q4, k4, v4, bias_raw, mask, m.scale, L, h, B)
-
-        # Apply sigmoid gating in [d, L, h, B] space (matching flash attn output)
-        g = reshape(g, d, h, L, B)
-        g = permutedims(g, (1, 3, 2, 4))  # [d, L, h, B]
-        attn_out = sigmoid.(g) .* attn_out
-
-        # Permute back: [d, L, h, B] -> [d, h, L, B] -> [inner_dim, L, B]
-        attn_out = permutedims(attn_out, (1, 3, 2, 4))
-        attn_out = reshape(attn_out, inner_dim, L, B)
-
-        return m.to_out(attn_out)
-    end
-
-    # Inference path: buffer-pooled permutedims, eager freeing
-    q_r = reshape(q, d, h, L, B)
-    k_r = reshape(k, d, h, L, B)
-    v_r = reshape(v, d, h, L, B)
-
-    qkv_shape = (d, L, h, B)
-    q4 = _get_perm_buf(20, qkv_shape)
-    k4 = _get_perm_buf(21, qkv_shape)
-    v4 = _get_perm_buf(22, qkv_shape)
-    permutedims!(q4, q_r, (1, 3, 2, 4))
-    permutedims!(k4, k_r, (1, 3, 2, 4))
-    permutedims!(v4, v_r, (1, 3, 2, 4))
-    CUDA.unsafe_free!(qkv)
+    q4 = permutedims(reshape(q, d, h, L, B), (1, 3, 2, 4))
+    k4 = permutedims(reshape(k, d, h, L, B), (1, 3, 2, 4))
+    v4 = permutedims(reshape(v, d, h, L, B), (1, 3, 2, 4))
 
     # Compute pair bias
     if !isnothing(pair_feats) && !isnothing(m.pair_norm)
         pair_normed = m.pair_norm(pair_feats)
         bias_raw = m.to_bias(pair_normed)  # [h, L, L, B]
-        bias4 = permutedims(bias_raw, (3, 2, 1, 4))  # [L_k, L_q, h, B]
-        CUDA.unsafe_free!(bias_raw)
-
-        if !isnothing(mask)
-            mask_bias = reshape((1.0f0 .- mask) .* (-1.0f10), L, 1, 1, B)
-            bias4 = bias4 .+ mask_bias
-        end
-
-        flash_out = _get_perm_buf(23, qkv_shape)
-        flash_attention_bias(q4, k4, v4, bias4; scale=m.scale, output=flash_out)
-        CUDA.unsafe_free!(bias4)
     else
-        if !isnothing(mask)
-            mask_bias = reshape((1.0f0 .- mask) .* (-1.0f10), L, 1, 1, B)
-            mask_bias_full = repeat(mask_bias, 1, L, h, 1)
-            flash_out = _get_perm_buf(23, qkv_shape)
-            flash_attention_bias(q4, k4, v4, mask_bias_full; scale=m.scale, output=flash_out)
-        else
-            flash_out = _get_perm_buf(23, qkv_shape)
-            flash_attention(q4, k4, v4; scale=m.scale, output=flash_out)
-        end
+        bias_raw = nothing
     end
 
+    attn_out = _flash_attn(q4, k4, v4, bias_raw, mask, m.scale, L, h, B)
+
     # Apply sigmoid gating in [d, L, h, B] space (matching flash attn output)
-    g_r = reshape(g, d, h, L, B)
-    g_perm = _get_perm_buf(25, qkv_shape)
-    permutedims!(g_perm, g_r, (1, 3, 2, 4))  # [d, L, h, B]
-    @. flash_out = NNlib.sigmoid(g_perm) * flash_out
+    g4 = permutedims(reshape(g, d, h, L, B), (1, 3, 2, 4))
+    attn_out = sigmoid.(g4) .* attn_out
 
     # Permute back: [d, L, h, B] -> [d, h, L, B] -> [inner_dim, L, B]
-    out_perm = _get_perm_buf(24, (d, h, L, B))
-    permutedims!(out_perm, flash_out, (1, 3, 2, 4))
-    attn_out = reshape(out_perm, inner_dim, L, B)
+    attn_out = permutedims(attn_out, (1, 3, 2, 4))
+    attn_out = reshape(attn_out, inner_dim, L, B)
 
     return m.to_out(attn_out)
 end
@@ -368,8 +309,8 @@ end
 GPU-optimized forward pass that combines:
 1. Pre-normalized pair features (normalize once, apply per-block affine)
 2. Batch-level pair conditioning (project [D,B] instead of [D,L*L*B])
-3. Flash attention via cuTile kernels
-4. Fused LayerNorm via cuTile kernels
+3. Flash attention via Onion dispatch → OnionTile cuTile kernels
+4. Fused LayerNorm via Onion dispatch → OnionTile cuTile kernels
 """
 function forward_from_raw_features_gpu(model::ScoreNetwork, raw_features::ScoreNetworkRawFeatures)
     mask = raw_features.mask
