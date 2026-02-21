@@ -656,10 +656,11 @@ final_path = joinpath(output_dir, "branching_full_final.jld2")
 save_branching_weights(model_cpu, final_path; include_base=true)
 println("Saved final model to: $final_path")
 
-# Also copy to weights dir for easy access
-copy_path = joinpath(weights_dir, "branching_full.jld2")
-cp(final_path, copy_path; force=true)
-println("Copied to: $copy_path")
+# NOTE: We intentionally do NOT copy to weights_dir here.
+# Archived weights should only be updated manually after validating the run.
+println("To promote this checkpoint, run:")
+println("  cp \"$final_path\" \"$(joinpath(weights_dir, "branching_full.jld2"))\"")
+println("  cp \"$final_path\" \"/home/claudey/safe_models/branching_OU_<description>.jld2\"")
 
 # Generate final samples (DISABLED — see sampling bug note above)
 # println("\n=== Generating Final Samples ===")
