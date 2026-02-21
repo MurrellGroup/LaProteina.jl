@@ -10,7 +10,7 @@ using ChainRulesCore
 using Distributions
 using Printf
 using CUDA
-using cuDNN
+using cuDNN  # Required: Flux GPU backend detection needs cuDNN loaded
 using JLD2
 
 # Re-export Flowfusion types for convenience
@@ -44,7 +44,7 @@ include("nn/decoder.jl")
 # Data loading
 include("data/pdb_loading.jl")
 
-# Inference (legacy)
+# Inference utilities (get_schedule, samples_to_pdb)
 include("inference.jl")
 
 # Flowfusion-based sampling
@@ -145,13 +145,8 @@ export
     DecoderTransformer, decode,
     get_atom_mask_from_aatype,
 
-    # Inference (legacy)
-    get_schedule, get_gt,
-    sample_rdn_noise,
-    rdn_interpolate, rdn_ode_step, rdn_sde_step,
-    vf_to_score, score_to_vf,
-    full_simulation, sample, samples_to_pdb,
-    fm_loss,
+    # Inference utilities
+    get_schedule, samples_to_pdb,
 
     # Flowfusion-based sampling
     RDNFlow, gen, bridge, step,
