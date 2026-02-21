@@ -10,7 +10,7 @@ using ChainRulesCore
 using Distributions
 using Printf
 using CUDA
-using cuDNN  # Required: Flux GPU backend detection needs cuDNN loaded
+using cuDNN  # Required: Flux GPU backend detection + softmax accuracy fix
 using JLD2
 
 # Re-export Flowfusion types for convenience
