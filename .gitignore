@@ -15,6 +15,13 @@ test/samples_*/
 test/afdb_vae_comparison/
 test/*.npy
 
+# Training outputs and checkpoints
+outputs/
+good_runs/
+
+# Sample PDBs
+scripts/samples_*/
+
 # Logs
 *.log
 
