@@ -14,10 +14,8 @@
 #   WARMDOWN_BATCHES - Linear warmdown batches at end (default: 2000)
 #   SAMPLE_EVERY - Generate samples every N batches (default: 2000)
 
-using Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
-
 using LaProteina
+using OnionTile  # Activates cuTile CuArray overrides for Onion dispatch hooks
 using LaProteina: ScoreNetworkRawFeatures, extract_raw_features, cpu
 using LaProteina: compute_sc_feature_offsets, update_sc_raw_features!
 using LaProteina: DecoderTransformer, load_decoder_weights!, samples_to_pdb
@@ -38,12 +36,6 @@ using Printf
 using JLD2
 using Dates
 
-# Include branching module
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_score_network.jl"))
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_states.jl"))
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_training.jl"))
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_inference.jl"))
-
 # NOTE: unsafe_free! override disabled — was causing CUDA error 700 race condition
 # with parallel DataLoader when batches are small/fast (Poisson(0) start lengths).
 # Flux.MLDataDevices.Internal.unsafe_free!(x) = (Flux.fmapstructure(Flux.MLDataDevices.Internal.unsafe_free_internal!, x); return nothing)
@@ -58,7 +50,7 @@ println("=" ^ 70)
 # Configuration
 # ============================================================================
 shard_dir = get(ENV, "SHARD_DIR", expanduser("~/shared_data/afdb_laproteina/precomputed_shards"))
-weights_dir = get(ENV, "WEIGHTS_DIR", joinpath(@__DIR__, "..", "weights"))
+weights_dir = get(ENV, "WEIGHTS_DIR", "/home/claudey/JuProteina/ArchivedJuProteina/weights")
 output_dir = get(ENV, "OUTPUT_DIR", joinpath(@__DIR__, "..", "outputs", "branching_OU_$(Dates.format(now(), "yyyymmdd_HHMMSS"))"))
 batch_size = parse(Int, get(ENV, "BATCH_SIZE", "8"))
 n_batches = parse(Int, get(ENV, "N_BATCHES", "100000"))
@@ -124,10 +116,6 @@ if CUDA.functional()
     println("Memory: $(round(CUDA.available_memory() / 1e9, digits=2)) GB available")
     LaProteina.enable_tf32!()  # TF32 + cuDNN ACCURATE softmax fix
     println("TF32 math mode: $(CUDA.math_mode())")
-    println("cuTile available: $(LaProteina._HAS_CUTILE)")
-    if !LaProteina._HAS_CUTILE
-        error("cuTile is required for training. Ensure LAPROTEINA_NOCUTILE and LAPROTEINA_NO_OVERRIDES are not set, and recompile LaProteina.")
-    end
     dev = gpu
 else
     println("No CUDA - using CPU")
@@ -411,11 +399,12 @@ function Base.getindex(x::BatchDataset, i::Int)
 end
 
 dataset = BatchDataset(batch_indices, all_proteins, P, base_model_cpu)
-# NOTE: if you hit CUDA error 700 race conditions, try parallel=false here.
-# GC finalizers for CuArrays can run on the DataLoader worker thread, calling
-# cuMemFreeAsync from the wrong CUDA context.
-dataloader = Flux.DataLoader(dataset; batchsize=-1, parallel=true)
-println("DataLoader created with parallel=true, batchsize=-1")
+# IMPORTANT: parallel=false is ~24% faster than parallel=true here.
+# Benchmarked 2026-02-21: parallel=true 1464ms/batch vs parallel=false 1178ms/batch.
+# Likely cause: Julia's stop-the-world GC triggered by the background thread's
+# allocations stalls the main GPU thread. Do not change without re-benchmarking.
+dataloader = Flux.DataLoader(dataset; batchsize=-1, parallel=false)
+println("DataLoader created with parallel=false, batchsize=-1")
 
 # ============================================================================
 # Learning Rate Schedule
@@ -539,10 +528,10 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
         end
 
         # Clamp individual losses BEFORE summing to prevent NaN gradients
-        ca_clamped = isfinite(ca_loss) ? softclamp(ca_loss) : 0.0f0
-        ll_clamped = isfinite(ll_loss) ? softclamp(ll_loss) : 0.0f0
-        split_clamped = isfinite(split_l) ? softclamp(split_l) : 0.0f0
-        del_clamped = isfinite(del_l) ? softclamp(del_l) : 0.0f0
+        ca_clamped = isfinite(ca_loss) ? LaProteina.softclamp(ca_loss) : 0.0f0
+        ll_clamped = isfinite(ll_loss) ? LaProteina.softclamp(ll_loss) : 0.0f0
+        split_clamped = isfinite(split_l) ? LaProteina.softclamp(split_l) : 0.0f0
+        del_clamped = isfinite(del_l) ? LaProteina.softclamp(del_l) : 0.0f0
 
         total_loss = ca_clamped + ll_clamped + split_clamped + del_clamped
 

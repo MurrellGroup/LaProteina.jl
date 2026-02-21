@@ -216,16 +216,13 @@ function logistic_bce_loss(logits::AbstractArray{T}, targets, mask, scale) where
     #     = y * softplus(-x) + (1-y) * softplus(x)
     #     = (1-y) * x + softplus(-x)  # More stable form
 
-    loss_per_pos = (one(T) .- targets) .* logits .+ softplus.(-logits)
+    loss_per_pos = (one(T) .- targets) .* logits .+ NNlib.softplus.(-logits)
 
     # Apply mask and scale
     loss_per_pos = loss_per_pos .* mask .* scale
 
     return sum(loss_per_pos) / max(sum(mask), one(T))
 end
-
-# Stable softplus
-softplus(x) = x > 20 ? x : log1p(exp(x))
 
 """
     indel_only_loss(model::BranchingScoreNetwork, batch;

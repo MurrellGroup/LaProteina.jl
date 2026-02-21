@@ -60,6 +60,13 @@ include("training/precompute_encoder.jl")
 # Must be included after all layer definitions so CuArray methods override defaults
 include("gpu/gpu.jl")
 
+# Branching Flows (variable-length generation via coalescent flows)
+# Must be after gpu/gpu.jl since branching_score_network.jl uses _transformer_block_prenormed
+include("branching/branching_score_network.jl")
+include("branching/branching_states.jl")
+include("branching/branching_training.jl")
+include("branching/branching_inference.jl")
+
 # Exports
 export
     # Constants
@@ -167,6 +174,19 @@ export
     # Training utilities - precomputed encoder
     PrecomputedProteinNT, precompute_single_protein,
     precompute_dataset_sharded, precompute_dataset_single,
-    load_precomputed_shard, batch_from_precomputed
+    load_precomputed_shard, batch_from_precomputed,
+
+    # Branching Flows (variable-length generation)
+    BranchingScoreNetwork, BranchingScoreNetworkWrapper, NullProcess,
+    forward_branching_from_raw_features, forward_branching_from_raw_features_gpu,
+    save_branching_weights, load_branching_weights!, load_base_weights!,
+    trainable_indel_params, freeze_base!,
+    protein_to_branching_state, X0_sampler_laproteina,
+    proteins_to_X1_states, extract_state_tensors, expand_by_indices,
+    branching_training_batch, branching_flow_loss, indel_only_loss,
+    staged_training_step!, freeze_base_in_state!, thaw_base_in_state!,
+    setup_optimizer,
+    create_branching_processes, create_initial_state,
+    generate_with_branching, reset_self_conditioning!
 
 end # module

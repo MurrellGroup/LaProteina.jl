@@ -11,10 +11,8 @@
 #   julia -t 4 scripts/sample_branching_full_OU.jl --compare 5 --ca-v0 55 --ll-v0 40  # 5 original + 5 modified
 #   julia -t 4 scripts/sample_branching_full_OU.jl --start-length 0                   # start from L=1 (Poisson(0))
 
-using Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
-
 using LaProteina
+using OnionTile  # Activates cuTile CuArray overrides for Onion dispatch hooks
 using LaProteina: DecoderTransformer, load_decoder_weights!, samples_to_pdb
 using BranchingFlows
 using BranchingFlows: BranchingState, CoalescentFlow
@@ -27,9 +25,6 @@ using Distributions: Beta, Poisson
 using Random
 using Statistics
 using JLD2
-
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_score_network.jl"))
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_inference.jl"))
 
 use_annealed = "--annealed" in ARGS
 # Parse --ca-v0 and --ll-v0 <value> if provided
@@ -65,7 +60,7 @@ dev = CUDA.functional() ? gpu : identity
 println("Device: $(CUDA.functional() ? "GPU" : "CPU")")
 
 # Load model with full fine-tuned weights
-weights_dir = joinpath(@__DIR__, "..", "weights")
+weights_dir = "/home/claudey/JuProteina/ArchivedJuProteina/weights"
 safe_models_dir = get(ENV, "SAFE_MODELS_DIR", "/home/claudey/safe_models")
 base = ScoreNetwork(
     n_layers=14, token_dim=768, pair_dim=256, n_heads=12,

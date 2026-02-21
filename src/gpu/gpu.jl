@@ -9,7 +9,7 @@ import ChainRulesCore as CRC
 using ChainRulesCore: NoTangent, unthunk
 
 # Onion provides the dispatch hooks (layernorm_first_forward, flash_attention_*_forward)
-# OnionTile overrides them with cuTile CuArray methods + rrules at runtime
+# OnionTile overrides them with cuTile CuArray methods + rrules when loaded in the run env
 using Onion: layernorm_first_forward, flash_attention_forward, flash_attention_bias_forward
 
 # ONIONop provides within_gradient (AD-context detection)

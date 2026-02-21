@@ -9,7 +9,6 @@ BioStructures = "de9282ab-8554-53be-b2d6-f6c222edabfc"
 BranchingFlows = "f304b33a-538b-441c-bfb5-9e50a8d4c9a8"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
-cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Flowfusion = "5b4e93c8-7b6e-4682-b400-fc3b238f52b1"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
@@ -28,6 +27,7 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
+cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 
 [sources]
 BranchingFlows = {path = "../BranchingFlows.jl"}

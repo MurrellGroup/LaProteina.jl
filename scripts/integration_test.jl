@@ -14,11 +14,9 @@
 # Usage:
 #   julia --project=. -t 4 scripts/integration_test.jl
 
-using Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
-
 # --- Same imports as train_branching_full_OU.jl ---
 using LaProteina
+using OnionTile  # Activates cuTile CuArray overrides for Onion dispatch hooks
 using LaProteina: ScoreNetworkRawFeatures, extract_raw_features, cpu
 using LaProteina: compute_sc_feature_offsets, update_sc_raw_features!
 using LaProteina: DecoderTransformer, load_decoder_weights!, samples_to_pdb
@@ -36,12 +34,6 @@ using Statistics
 using Random
 using Printf
 using JLD2
-
-# --- Same includes as train_branching_full_OU.jl ---
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_score_network.jl"))
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_states.jl"))
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_training.jl"))
-include(joinpath(@__DIR__, "..", "src", "branching", "branching_inference.jl"))
 
 Random.seed!(42)
 
@@ -546,10 +538,10 @@ try
             split_l = floss(P, out[:split], bd.split_target, bd.combined_mask, indel_scale)
             del_l = floss(P.deletion_policy, out[:del], bd.del_target, bd.combined_mask, indel_scale)
 
-            ca_clamped = isfinite(ca_loss) ? softclamp(ca_loss) : 0.0f0
-            ll_clamped = isfinite(ll_loss) ? softclamp(ll_loss) : 0.0f0
-            split_clamped = isfinite(split_l) ? softclamp(split_l) : 0.0f0
-            del_clamped = isfinite(del_l) ? softclamp(del_l) : 0.0f0
+            ca_clamped = isfinite(ca_loss) ? LaProteina.softclamp(ca_loss) : 0.0f0
+            ll_clamped = isfinite(ll_loss) ? LaProteina.softclamp(ll_loss) : 0.0f0
+            split_clamped = isfinite(split_l) ? LaProteina.softclamp(split_l) : 0.0f0
+            del_clamped = isfinite(del_l) ? LaProteina.softclamp(del_l) : 0.0f0
 
             total_loss = ca_clamped + ll_clamped + split_clamped + del_clamped
             min(total_loss, 20.0f0)
