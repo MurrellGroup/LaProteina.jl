@@ -2,7 +2,14 @@
 # Sample from the fully fine-tuned branching model (OUBridgeExpVar processes)
 # with cosine time steps. Loads final weights from the most recent training run.
 #
-# Usage: julia -t 4 scripts/sample_branching_full_OU.jl
+# Usage:
+#   julia -t 4 scripts/sample_branching_full_OU.jl                    # original (CA v0=150, LL v0=50)
+#   julia -t 4 scripts/sample_branching_full_OU.jl --annealed         # half-noise (CA v0=37.5, LL v0=12.5)
+#   julia -t 4 scripts/sample_branching_full_OU.jl --ca-v0 75         # custom CA v_at_0
+#   julia -t 4 scripts/sample_branching_full_OU.jl --ll-v0 25         # custom LL v_at_0
+#   julia -t 4 scripts/sample_branching_full_OU.jl --ca-v0 75 --ll-v0 25  # both custom
+#   julia -t 4 scripts/sample_branching_full_OU.jl --compare 5 --ca-v0 55 --ll-v0 40  # 5 original + 5 modified
+#   julia -t 4 scripts/sample_branching_full_OU.jl --start-length 0                   # start from L=1 (Poisson(0))
 
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
@@ -23,6 +30,30 @@ using JLD2
 
 include(joinpath(@__DIR__, "..", "src", "branching", "branching_score_network.jl"))
 include(joinpath(@__DIR__, "..", "src", "branching", "branching_inference.jl"))
+
+use_annealed = "--annealed" in ARGS
+# Parse --ca-v0 and --ll-v0 <value> if provided
+function parse_arg(args, flag)
+    for i in 1:length(args)-1
+        if args[i] == flag
+            return parse(Float32, args[i+1])
+        end
+    end
+    return nothing
+end
+function parse_string_arg(args, flag)
+    for i in 1:length(args)-1
+        if args[i] == flag
+            return args[i+1]
+        end
+    end
+    return nothing
+end
+ca_v0_override = parse_arg(ARGS, "--ca-v0")
+ll_v0_override = parse_arg(ARGS, "--ll-v0")
+compare_n = let v = parse_arg(ARGS, "--compare"); v === nothing ? nothing : Int(v) end
+start_length_param = let v = parse_arg(ARGS, "--start-length"); v === nothing ? 100 : Int(v) end
+weights_override = parse_string_arg(ARGS, "--weights")
 
 Random.seed!(42)
 
@@ -45,8 +76,12 @@ model = BranchingScoreNetwork(base)
 
 # Load the fully fine-tuned weights (includes base)
 # Prefer safe_models dir (validated weights), fall back to weights dir
-safe_weights_path = joinpath(safe_models_dir, "branching_OU_100k_20260216.jld2")
-full_weights_path = isfile(safe_weights_path) ? safe_weights_path : joinpath(weights_dir, "branching_full.jld2")
+full_weights_path = if weights_override !== nothing
+    weights_override
+else
+    safe_weights_path = joinpath(safe_models_dir, "branching_OU_100k_20260216.jld2")
+    isfile(safe_weights_path) ? safe_weights_path : joinpath(weights_dir, "branching_full.jld2")
+end
 println("Loading weights from: $full_weights_path")
 weights = load(full_weights_path)
 if haskey(weights, "base")
@@ -77,11 +112,60 @@ decoder = DecoderTransformer(
 load_decoder_weights!(decoder, joinpath(weights_dir, "decoder.npz"))
 println("Decoder loaded (CPU)")
 
-output_dir = joinpath(@__DIR__, "samples_branching_full_OU")
-mkpath(output_dir)
+# ── Process configurations ──────────────────────────────────────────────
+# OUBridgeExpVar(θ, v_at_0, v_at_1; dec):
+#   θ      = mean-reversion rate (higher → faster pull toward endpoint)
+#   v_at_0 = instantaneous noise variance at t=0 (noisy start)
+#   v_at_1 = instantaneous noise variance at t=1 (clean endpoint, ~0)
+#   dec    = exponential decay exponent for σ²(t) schedule (negative)
+#
+# The noise amplitude (std dev) at any step scales as √v_at_0, so
+# quartering v_at_0 halves the noise amplitude.
+#
+# Original (training):
+#   P_ca = OUBridgeExpVar(100, 150, 1e-9; dec=-3)
+#   P_ll = OUBridgeExpVar(100,  50, 1e-9; dec=-0.1)
+#
+# Annealed (half noise amplitude → v_at_0 / 4):
+#   P_ca = OUBridgeExpVar(100, 37.5, 1e-9; dec=-3)
+#   P_ll = OUBridgeExpVar(100, 12.5, 1e-9; dec=-0.1)
+
+function make_ca_process(v0::Float32)
+    OUBridgeExpVar(100f0, v0, 0.000000001f0, dec = -3f0)
+end
+
+function make_ll_process(v0::Float32)
+    OUBridgeExpVar(100f0, v0, 0.000000001f0, dec = -0.1f0)
+end
+
+function ca_label_str(v0)
+    v0 == 150f0 ? "ORIGINAL v0=150" : "v0=$v0 ($(round(sqrt(v0/150f0), digits=2))× noise amplitude)"
+end
+
+function ll_label_str(v0)
+    v0 == 50f0 ? "ORIGINAL v0=50" : "v0=$v0 ($(round(sqrt(v0/50f0), digits=2))× noise amplitude)"
+end
+
+# Resolve CA and LL v0 values for the modified process
+mod_ca_v0 = if ca_v0_override !== nothing
+    ca_v0_override
+elseif use_annealed
+    37.5f0
+else
+    150f0
+end
+
+mod_ll_v0 = if ll_v0_override !== nothing
+    ll_v0_override
+elseif use_annealed
+    12.5f0
+else
+    50f0
+end
 
 latent_dim = 8
-n_samples = 10
+
+println("Initial length distribution: Poisson($start_length_param) + 1")
 
 # Cosine time schedule — denser steps near t=0 and t=1
 step_func(t) = Float32(1 - (cos(t * pi) + 1) / 2)
@@ -94,102 +178,148 @@ println("First 5 steps: $(round.(steps[1:5], digits=4))")
 println("Last 5 steps: $(round.(steps[end-4:end], digits=4))")
 println()
 
-# OUBridgeExpVar processes (same as training)
-P_ca = OUBridgeExpVar(100f0, 150f0, 0.000000001f0, dec = -3f0)
-P_ll = OUBridgeExpVar(100f0, 50f0, 0.000000001f0, dec = -0.1f0)
+# ── Sampling function ───────────────────────────────────────────────────
+
+function run_samples(n_samples, output_dir, prefix, P_flow, wrapper, decoder,
+                     steps, nsteps, latent_dim; poisson_param=100)
+    mkpath(output_dir)
+    for sample_idx in 1:n_samples
+        println("--- $prefix sample $sample_idx ---")
+
+        initial_length = 1 + rand(Poisson(poisson_param))
+        reset_self_conditioning!(wrapper)
+        X0 = create_initial_state(initial_length, latent_dim)
+
+        Xt = X0
+        for i in 1:nsteps
+            t1, t2 = steps[i], steps[i+1]
+
+            L_current = size(Xt.groupings, 1)
+            if L_current == 0
+                println("  WARNING: Protein reached L=0 at step $i, skipping")
+                break
+            elseif L_current > 400
+                println("  WARNING: Protein grew to L=$L_current at step $i (>400), skipping to avoid OOM")
+                break
+            end
+
+            hat = wrapper(t1, Xt)
+            Xt = Flowfusion.step(P_flow, Xt, hat, t1, t2)
+
+            L_current = size(Xt.groupings, 1)
+            if i % 100 == 0
+                println("  Step $i/$nsteps: t=$(round(t2, digits=3)), L=$L_current")
+            end
+        end
+
+        ca_tensor = tensor(Xt.state[1].S)
+        ll_tensor = tensor(Xt.state[2].S)
+        ca_coords = dropdims(ca_tensor, dims=3)
+        latents = dropdims(ll_tensor, dims=3)
+        final_L = size(ca_coords, 2)
+
+        println("  Final length: $final_L (started at $initial_length)")
+
+        if final_L == 0
+            println("  Skipping empty protein")
+            println()
+            continue
+        end
+
+        dists = [sqrt(sum((ca_coords[:, i+1] .- ca_coords[:, i]).^2)) for i in 1:(final_L-1)]
+        mean_d = final_L > 1 ? mean(dists) : 0.0
+        println("  Mean CA-CA: $(round(mean_d, digits=3)) nm")
+
+        ca_3d = reshape(ca_coords, 3, final_L, 1)
+        ll_3d = reshape(latents, latent_dim, final_L, 1)
+        mask = ones(Float32, final_L, 1)
+
+        dec_input = Dict(:z_latent => ll_3d, :ca_coors => ca_3d, :mask => mask)
+        dec_out = decoder(dec_input)
+
+        samples = Dict(
+            :ca_coords => ca_3d,
+            :latents => ll_3d,
+            :all_atom_coords => dec_out[:coors],
+            :aatype => dec_out[:aatype_max],
+            :atom_mask => dec_out[:atom_mask],
+            :mask => mask
+        )
+
+        pdb_prefix = "$(prefix)_$(sample_idx)"
+        samples_to_pdb(samples, output_dir; prefix=pdb_prefix, save_all_atom=true)
+
+        aatype = dec_out[:aatype_max][:, 1]
+        seq = join([index_to_aa(aa) for aa in aatype])
+        println("  Sequence: $(seq[1:min(40, length(seq))])...")
+        println()
+
+        GC.gc()
+        CUDA.reclaim()
+    end
+end
+
+# ── Main ────────────────────────────────────────────────────────────────
+
 P_idx = NullProcess()
 branch_time_dist = Beta(1.0, 2.0)
-P = CoalescentFlow((P_ca, P_ll, P_idx), branch_time_dist)
-println("Processes: OUBridgeExpVar (CA: θ=100, v0=150, v1=1e-9, dec=-3; LL: θ=100, v0=50, v1=1e-9, dec=-0.1)")
 
-# Create wrapper once (reuse across samples, reset self-conditioning between)
 wrapper = BranchingScoreNetworkWrapper(model, latent_dim;
     self_cond=true, dev=dev, processes=nothing)
 
-for sample_idx in 1:n_samples
-    println("--- Sample $sample_idx ---")
+if compare_n !== nothing
+    # --compare N: run N with original process, then N with modified process
+    n = compare_n
 
-    initial_length = max(1, rand(Poisson(100)))
+    # Build output dir name
+    parts = String[]
+    ca_v0_override !== nothing && push!(parts, "ca$(Int(mod_ca_v0))")
+    ll_v0_override !== nothing && push!(parts, "ll$(Int(mod_ll_v0))")
+    use_annealed && isempty(parts) && push!(parts, "annealed")
+    tag = isempty(parts) ? "original" : join(parts, "_")
+    output_dir = joinpath(@__DIR__, "samples_compare_$(tag)_n$(n)")
 
-    # Reset self-conditioning for new sample
-    reset_self_conditioning!(wrapper)
+    # Original process
+    P_orig = CoalescentFlow((make_ca_process(150f0), make_ll_process(50f0), P_idx), branch_time_dist)
+    println("── Original process ($n samples) ──")
+    println("  CA: $(ca_label_str(150f0))  LL: $(ll_label_str(50f0))")
+    run_samples(n, output_dir, "original", P_orig, wrapper, decoder,
+                steps, nsteps, latent_dim; poisson_param=start_length_param)
 
-    # Create initial state (randn noise, no process-specific sampling)
-    X0 = create_initial_state(initial_length, latent_dim)
+    # Modified process
+    P_mod = CoalescentFlow((make_ca_process(mod_ca_v0), make_ll_process(mod_ll_v0), P_idx), branch_time_dist)
+    println("── Modified process ($n samples) ──")
+    println("  CA: $(ca_label_str(mod_ca_v0))  LL: $(ll_label_str(mod_ll_v0))")
+    run_samples(n, output_dir, "modified", P_mod, wrapper, decoder,
+                steps, nsteps, latent_dim; poisson_param=start_length_param)
 
-    # Run generation with cosine steps
-    Xt = X0
-    for i in 1:nsteps
-        t1, t2 = steps[i], steps[i+1]
+    println("=" ^ 70)
+    println("Comparison samples saved to: $output_dir")
+    println("=" ^ 70)
+else
+    # Single-mode run (original behavior)
+    P = CoalescentFlow((make_ca_process(mod_ca_v0), make_ll_process(mod_ll_v0), P_idx), branch_time_dist)
+    println("CA process: $(ca_label_str(mod_ca_v0))  (θ=100, v1=1e-9, dec=-3)")
+    println("LL process: $(ll_label_str(mod_ll_v0))  (θ=100, v1=1e-9, dec=-0.1)")
 
-        # Guard against empty or excessively large proteins
-        L_current = size(Xt.groupings, 1)
-        if L_current == 0
-            println("  WARNING: Protein reached L=0 at step $i, skipping")
-            break
-        elseif L_current > 400
-            println("  WARNING: Protein grew to L=$L_current at step $i (>400), skipping to avoid OOM")
-            break
-        end
-
-        hat = wrapper(t1, Xt)
-        Xt = Flowfusion.step(P, Xt, hat, t1, t2)
-
-        L_current = size(Xt.groupings, 1)
-        if i % 100 == 0
-            println("  Step $i/$nsteps: t=$(round(t2, digits=3)), L=$L_current")
-        end
+    has_custom = ca_v0_override !== nothing || ll_v0_override !== nothing
+    output_suffix = if has_custom
+        parts = String[]
+        ca_v0_override !== nothing && push!(parts, "ca$(Int(mod_ca_v0))")
+        ll_v0_override !== nothing && push!(parts, "ll$(Int(mod_ll_v0))")
+        "_" * join(parts, "_")
+    elseif use_annealed
+        "_annealed"
+    else
+        ""
     end
+    output_dir = joinpath(@__DIR__, "samples_branching_full_OU$output_suffix")
 
-    # Extract final state
-    ca_tensor = tensor(Xt.state[1].S)
-    ll_tensor = tensor(Xt.state[2].S)
-    ca_coords = dropdims(ca_tensor, dims=3)
-    latents = dropdims(ll_tensor, dims=3)
-    final_L = size(ca_coords, 2)
+    n_samples = 10
+    run_samples(n_samples, output_dir, "OU_cosine", P, wrapper, decoder,
+                steps, nsteps, latent_dim; poisson_param=start_length_param)
 
-    println("  Final length: $final_L (started at $initial_length)")
-
-    if final_L == 0
-        println("  Skipping empty protein")
-        println()
-        continue
-    end
-
-    # CA-CA distances
-    dists = [sqrt(sum((ca_coords[:, i+1] .- ca_coords[:, i]).^2)) for i in 1:(final_L-1)]
-    mean_d = final_L > 1 ? mean(dists) : 0.0
-    println("  Mean CA-CA: $(round(mean_d, digits=3)) nm")
-
-    # Decode and save
-    ca_3d = reshape(ca_coords, 3, final_L, 1)
-    ll_3d = reshape(latents, latent_dim, final_L, 1)
-    mask = ones(Float32, final_L, 1)
-
-    dec_input = Dict(:z_latent => ll_3d, :ca_coors => ca_3d, :mask => mask)
-    dec_out = decoder(dec_input)
-
-    samples = Dict(
-        :ca_coords => ca_3d,
-        :latents => ll_3d,
-        :all_atom_coords => dec_out[:coors],
-        :aatype => dec_out[:aatype_max],
-        :atom_mask => dec_out[:atom_mask],
-        :mask => mask
-    )
-
-    samples_to_pdb(samples, output_dir; prefix="OU_cosine_$sample_idx", save_all_atom=true)
-
-    aatype = dec_out[:aatype_max][:, 1]
-    seq = join([index_to_aa(aa) for aa in aatype])
-    println("  Sequence: $(seq[1:min(40, length(seq))])...")
-    println()
-
-    # Clean up GPU memory between samples
-    GC.gc()
-    CUDA.reclaim()
+    println("=" ^ 70)
+    println("Samples saved to: $output_dir")
+    println("=" ^ 70)
 end
-
-println("=" ^ 70)
-println("Samples saved to: $output_dir")
-println("=" ^ 70)

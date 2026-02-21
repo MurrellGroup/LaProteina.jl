@@ -44,8 +44,9 @@ include(joinpath(@__DIR__, "..", "src", "branching", "branching_states.jl"))
 include(joinpath(@__DIR__, "..", "src", "branching", "branching_training.jl"))
 include(joinpath(@__DIR__, "..", "src", "branching", "branching_inference.jl"))
 
-# CRITICAL: Override unsafe_free! for proper GPU memory management with DataLoader
-Flux.MLDataDevices.Internal.unsafe_free!(x) = (Flux.fmapstructure(Flux.MLDataDevices.Internal.unsafe_free_internal!, x); return nothing)
+# NOTE: unsafe_free! override disabled — was causing CUDA error 700 race condition
+# with parallel DataLoader when batches are small/fast (Poisson(0) start lengths).
+# Flux.MLDataDevices.Internal.unsafe_free!(x) = (Flux.fmapstructure(Flux.MLDataDevices.Internal.unsafe_free_internal!, x); return nothing)
 
 Random.seed!(42)
 
@@ -61,7 +62,9 @@ weights_dir = get(ENV, "WEIGHTS_DIR", joinpath(@__DIR__, "..", "weights"))
 output_dir = get(ENV, "OUTPUT_DIR", joinpath(@__DIR__, "..", "outputs", "branching_OU_$(Dates.format(now(), "yyyymmdd_HHMMSS"))"))
 batch_size = parse(Int, get(ENV, "BATCH_SIZE", "8"))
 n_batches = parse(Int, get(ENV, "N_BATCHES", "100000"))
-warmdown_batches = parse(Int, get(ENV, "WARMDOWN_BATCHES", "3000"))
+# NOTE: LR is adjusted every 10 batches, so linear_decay_schedule gets
+# warmdown_batches ÷ 10 steps. E.g. 10000 warmdown batches = 1000 LR steps.
+warmdown_batches = parse(Int, get(ENV, "WARMDOWN_BATCHES", "10000"))
 sample_every = parse(Int, get(ENV, "SAMPLE_EVERY", "5000"))
 latent_dim = 8
 
@@ -70,7 +73,7 @@ latent_dim = 8
 sched = burnin_learning_schedule(0.00001f0, 0.000250f0, 1.05f0, 0.99995f0)
 
 # Branching parameters (matching BranchChain)
-X0_mean_length = 100
+X0_mean_length = 0  # Poisson(0) → all samples start from length=1
 deletion_pad = 1.1
 
 # Loss calibration factors for OUBridgeExpVar processes
@@ -408,6 +411,9 @@ function Base.getindex(x::BatchDataset, i::Int)
 end
 
 dataset = BatchDataset(batch_indices, all_proteins, P, base_model_cpu)
+# NOTE: if you hit CUDA error 700 race conditions, try parallel=false here.
+# GC finalizers for CuArrays can run on the DataLoader worker thread, calling
+# cuMemFreeAsync from the wrong CUDA context.
 dataloader = Flux.DataLoader(dataset; batchsize=-1, parallel=true)
 println("DataLoader created with parallel=true, batchsize=-1")
 
@@ -559,7 +565,9 @@ for (batch_idx, bd_cpu) in enumerate(dataloader)
 
     # LR schedule (matching BranchChain: adjust every 10 batches)
     if batch_idx % 10 == 0
-        # Switch to linear decay at warmdown
+        # Switch to linear decay at warmdown.
+        # warmdown_batches ÷ 10 because LR is adjusted every 10 batches,
+        # e.g. 10000 warmdown batches → 1000 LR steps.
         if batch_idx == warmdown_start
             global sched
             sched = linear_decay_schedule(sched.lr, 0.000000001f0, warmdown_batches ÷ 10)
