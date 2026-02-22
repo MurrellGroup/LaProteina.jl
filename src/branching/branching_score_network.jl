@@ -300,10 +300,10 @@ end
 """
     load_base_weights!(model::BranchingScoreNetwork, path::String)
 
-Load pretrained weights into the base ScoreNetwork.
+Load pretrained weights into the base ScoreNetwork from SafeTensors.
 """
 function load_base_weights!(model::BranchingScoreNetwork, path::String)
-    load_score_network_weights!(model.base, path)
+    load_score_network_weights_st!(model.base, path)
     return model
 end
 
@@ -342,7 +342,7 @@ Load weights into BranchingScoreNetwork.
 # Arguments
 - `model`: BranchingScoreNetwork to load into
 - `path`: Path to JLD2 file with indel head weights
-- `base_weights_path`: Optional path to NPZ file with base ScoreNetwork weights.
+- `base_weights_path`: Optional path to SafeTensors file with base ScoreNetwork weights.
                        If not provided and the JLD2 doesn't contain base weights,
                        base model keeps its current (random) weights.
 """
@@ -366,7 +366,7 @@ function load_branching_weights!(model::BranchingScoreNetwork, path::String;
     if haskey(weights, "base")
         Flux.loadmodel!(model.base, weights["base"])
     elseif !isnothing(base_weights_path)
-        load_score_network_weights!(model.base, base_weights_path)
+        load_score_network_weights_st!(model.base, base_weights_path)
     end
 
     return model

@@ -61,7 +61,7 @@ dev = CUDA.functional() ? gpu : identity
 println("Device: $(CUDA.functional() ? "GPU" : "CPU")")
 
 # Load model with full fine-tuned weights
-weights_dir = "/home/claudey/JuProteina/ArchivedJuProteina/weights"
+checkpoints_dir = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina"
 safe_models_dir = get(ENV, "SAFE_MODELS_DIR", "/home/claudey/safe_models")
 base = ScoreNetwork(
     n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
@@ -84,9 +84,7 @@ if haskey(weights, "base")
     Flux.loadmodel!(model.base, weights["base"]; strict=false)
     println("  Loaded fine-tuned base weights")
 else
-    # Fallback: load pretrained base + indel heads separately
-    load_score_network_weights!(model.base, joinpath(weights_dir, "score_network.npz"))
-    println("  Loaded pretrained base weights (no fine-tuned base in checkpoint)")
+    error("Checkpoint does not contain base weights: $full_weights_path")
 end
 if haskey(weights, "indel_time_proj")
     Flux.loadmodel!(model.indel_time_proj, weights["indel_time_proj"])
@@ -105,7 +103,7 @@ decoder = DecoderTransformer(
     n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
     dim_cond=128, latent_dim=8, qk_ln=true, update_pair_repr=false
 )
-load_decoder_weights!(decoder, joinpath(weights_dir, "decoder.npz"))
+load_decoder_weights_st!(decoder, joinpath(checkpoints_dir, "AE1_ucond_512.safetensors"))
 println("Decoder loaded (CPU)")
 
 # ── Process configurations ──────────────────────────────────────────────

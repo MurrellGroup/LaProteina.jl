@@ -1,5 +1,5 @@
 # SafeTensors weight loading utilities for pretrained models
-# Parallel to weights.jl (NPZ-based), adapted for PyTorch state_dict key names
+# Loads weights from PyTorch state_dict key names in SafeTensors format
 
 using Flux
 

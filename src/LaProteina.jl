@@ -57,7 +57,6 @@ include("inference.jl")
 include("flowfusion_sampling.jl")
 
 # Weight loading
-include("weights.jl")
 include("weights_safetensors.jl")
 
 # Training utilities
@@ -183,8 +182,6 @@ export
     # PDB I/O
     load_pdb, extract_ca_coords, batch_pdb_data, save_pdb,
 
-    # Weight loading (NPZ)
-    load_score_network_weights!, load_decoder_weights!, load_encoder_weights!,
     # Weight loading (SafeTensors)
     load_score_network_weights_st!, load_decoder_weights_st!, load_encoder_weights_st!,
 

@@ -51,6 +51,7 @@ println("=" ^ 70)
 # ============================================================================
 shard_dir = get(ENV, "SHARD_DIR", expanduser("~/shared_data/afdb_laproteina/precomputed_shards"))
 weights_dir = get(ENV, "WEIGHTS_DIR", "/home/claudey/JuProteina/ArchivedJuProteina/weights")
+checkpoints_dir = get(ENV, "CHECKPOINTS_DIR", "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina")
 output_dir = get(ENV, "OUTPUT_DIR", joinpath(@__DIR__, "..", "outputs", "branching_OU_$(Dates.format(now(), "yyyymmdd_HHMMSS"))"))
 batch_size = parse(Int, get(ENV, "BATCH_SIZE", "8"))
 n_batches = parse(Int, get(ENV, "N_BATCHES", "100000"))
@@ -169,7 +170,7 @@ base = ScoreNetwork(
 model = BranchingScoreNetwork(base)
 
 # Load stage 1 weights (indel heads + base)
-base_weights_path = joinpath(weights_dir, "score_network.npz")
+base_weights_path = joinpath(checkpoints_dir, "LD1_ucond_notri_512.safetensors")
 indel_weights_path = joinpath(weights_dir, "branching_indel_stage1.jld2")
 
 println("Loading base weights from: $base_weights_path")
@@ -202,8 +203,8 @@ println("Optimizer: Muon with burnin_learning_schedule")
 #     n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
 #     dim_cond=128, latent_dim=latent_dim, qk_ln=true, update_pair_repr=false
 # )
-# decoder_weights_path = joinpath(weights_dir, "decoder.npz")
-# load_decoder_weights!(decoder, decoder_weights_path)
+# decoder_weights_path = joinpath(checkpoints_dir, "AE1_ucond_512.safetensors")
+# load_decoder_weights_st!(decoder, decoder_weights_path)
 # println("Decoder loaded (kept on CPU for sampling)")
 
 # ============================================================================

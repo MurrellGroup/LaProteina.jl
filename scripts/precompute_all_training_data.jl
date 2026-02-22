@@ -98,7 +98,7 @@ encoder_cpu = EncoderTransformer(
     n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
     dim_cond=128, latent_dim=latent_dim, qk_ln=true, update_pair_repr=false
 )
-load_encoder_weights!(encoder_cpu, joinpath(@__DIR__, "..", "weights", "encoder.npz"))
+load_encoder_weights_st!(encoder_cpu, joinpath(@__DIR__, "..", "..", "la-proteina", "checkpoints_laproteina", "AE1_ucond_512.safetensors"))
 log_msg("Encoder loaded on CPU")
 
 encoder_gpu = deepcopy(encoder_cpu) |> gpu
