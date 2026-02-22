@@ -298,12 +298,14 @@ function trainable_indel_params(model::BranchingScoreNetwork)
 end
 
 """
-    load_base_weights!(model::BranchingScoreNetwork, path::String)
+    load_base_weights!(model::BranchingScoreNetwork, filename::String; local_path=nothing)
 
 Load pretrained weights into the base ScoreNetwork from SafeTensors.
+Downloads from HuggingFace by default; pass `local_path` for local files.
 """
-function load_base_weights!(model::BranchingScoreNetwork, path::String)
-    load_score_network_weights_st!(model.base, path)
+function load_base_weights!(model::BranchingScoreNetwork, filename::String;
+                             local_path::Union{String,Nothing}=nothing)
+    load_score_network_weights_st!(model.base, filename; local_path)
     return model
 end
 
@@ -366,7 +368,7 @@ function load_branching_weights!(model::BranchingScoreNetwork, path::String;
     if haskey(weights, "base")
         Flux.loadmodel!(model.base, weights["base"])
     elseif !isnothing(base_weights_path)
-        load_score_network_weights_st!(model.base, base_weights_path)
+        load_score_network_weights_st!(model.base, basename(base_weights_path); local_path=base_weights_path)
     end
 
     return model

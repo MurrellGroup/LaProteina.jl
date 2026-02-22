@@ -1,11 +1,29 @@
 # SafeTensors weight loading utilities for pretrained models
 # Loads weights from PyTorch state_dict key names in SafeTensors format
+# Supports automatic download from HuggingFace Hub when local files are not found.
 
 using Flux
+import HuggingFaceApi
 
-# Conditionally load SafeTensors
 # SafeTensors.jl provides: load_safetensors(path) → Dict{String, Array}
 import SafeTensors
+
+# ============================================================================
+# HuggingFace Hub integration — auto-download pretrained weights
+# ============================================================================
+
+const DEFAULT_HF_REPO = "MurrellLab/LaProteina.jl"
+
+"""
+    _hf_download(filename::String)
+
+Download a weights file from HuggingFace Hub (with automatic caching).
+Set `ENV["LAPROTEINA_HF_REPO"]` to override the default repo.
+"""
+function _hf_download(filename::String)
+    repo_id = get(ENV, "LAPROTEINA_HF_REPO", DEFAULT_HF_REPO)
+    return HuggingFaceApi.hf_hub_download(repo_id, filename)
+end
 
 # ============================================================================
 # Tracking infrastructure — catches wrong prefix, missing/extra keys
@@ -38,11 +56,18 @@ end
 _st_get(weights::Dict, prefix::String, key::String) = _st_get(weights, prefix * key)
 
 """
-    _load_safetensors(path::String) -> Dict{String, Array}
+    _load_safetensors(filename::String; local_path=nothing) -> Dict{String, Array}
 
 Load a .safetensors file and return all tensors as a Dict.
+Downloads from HuggingFace Hub by default. If `local_path` is provided, loads from that
+local file instead (for experimental/custom weights not on HuggingFace).
 """
-function _load_safetensors(path::String)
+function _load_safetensors(filename::String; local_path::Union{String,Nothing}=nothing)
+    path = if !isnothing(local_path)
+        local_path
+    else
+        _hf_download(filename)
+    end
     return SafeTensors.load_safetensors(path)
 end
 
@@ -104,17 +129,21 @@ end
 # ============================================================================
 
 """
-    load_score_network_weights_st!(model::ScoreNetwork, weights_path::String;
-                                    prefix::String="nn.", strict::Bool=true)
+    load_score_network_weights_st!(model::ScoreNetwork, filename::String;
+                                    prefix::String="nn.", strict::Bool=true,
+                                    local_path::Union{String,Nothing}=nothing)
 
-Load pretrained weights into ScoreNetwork from SafeTensors file.
+Load pretrained weights into ScoreNetwork from SafeTensors.
+Downloads `filename` from HuggingFace Hub by default (with caching).
+Pass `local_path` to load from a specific local file instead.
+
 PyTorch Lightning state_dict keys have an "nn." prefix by default.
-
 If `strict=true` (default), errors on any mismatch between file keys and model parameters.
 """
-function load_score_network_weights_st!(model::ScoreNetwork, weights_path::String;
-                                         prefix::String="nn.", strict::Bool=true)
-    weights = _load_safetensors(weights_path)
+function load_score_network_weights_st!(model::ScoreNetwork, filename::String;
+                                         prefix::String="nn.", strict::Bool=true,
+                                         local_path::Union{String,Nothing}=nothing)
+    weights = _load_safetensors(filename; local_path)
     _st_tracker[] = _STLoadTracker()  # Reset tracker
 
     # init_repr_factory: sequence feature projection
@@ -570,16 +599,20 @@ end
 # ============================================================================
 
 """
-    load_encoder_weights_st!(model::EncoderTransformer, weights_path::String;
-                              prefix::String="encoder.", strict::Bool=true)
+    load_encoder_weights_st!(model::EncoderTransformer, filename::String;
+                              prefix::String="encoder.", strict::Bool=true,
+                              local_path::Union{String,Nothing}=nothing)
 
-Load pretrained weights into EncoderTransformer from SafeTensors file.
+Load pretrained weights into EncoderTransformer from SafeTensors.
+Downloads `filename` from HuggingFace Hub by default (with caching).
+Pass `local_path` to load from a specific local file instead.
 
 If `strict=true` (default), errors on any mismatch between file keys and model parameters.
 """
-function load_encoder_weights_st!(model::EncoderTransformer, weights_path::String;
-                                    prefix::String="encoder.", strict::Bool=true)
-    weights = _load_safetensors(weights_path)
+function load_encoder_weights_st!(model::EncoderTransformer, filename::String;
+                                    prefix::String="encoder.", strict::Bool=true,
+                                    local_path::Union{String,Nothing}=nothing)
+    weights = _load_safetensors(filename; local_path)
     _st_tracker[] = _STLoadTracker()  # Reset tracker
 
     # init_repr_factory
@@ -627,16 +660,20 @@ end
 # ============================================================================
 
 """
-    load_decoder_weights_st!(model::DecoderTransformer, weights_path::String;
-                              prefix::String="decoder.", strict::Bool=true)
+    load_decoder_weights_st!(model::DecoderTransformer, filename::String;
+                              prefix::String="decoder.", strict::Bool=true,
+                              local_path::Union{String,Nothing}=nothing)
 
-Load pretrained weights into DecoderTransformer from SafeTensors file.
+Load pretrained weights into DecoderTransformer from SafeTensors.
+Downloads `filename` from HuggingFace Hub by default (with caching).
+Pass `local_path` to load from a specific local file instead.
 
 If `strict=true` (default), errors on any mismatch between file keys and model parameters.
 """
-function load_decoder_weights_st!(model::DecoderTransformer, weights_path::String;
-                                    prefix::String="decoder.", strict::Bool=true)
-    weights = _load_safetensors(weights_path)
+function load_decoder_weights_st!(model::DecoderTransformer, filename::String;
+                                    prefix::String="decoder.", strict::Bool=true,
+                                    local_path::Union{String,Nothing}=nothing)
+    weights = _load_safetensors(filename; local_path)
     _st_tracker[] = _STLoadTracker()  # Reset tracker
 
     # init_repr_factory

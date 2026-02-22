@@ -203,8 +203,7 @@ println("Optimizer: Muon with burnin_learning_schedule")
 #     n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
 #     dim_cond=128, latent_dim=latent_dim, qk_ln=true, update_pair_repr=false
 # )
-# decoder_weights_path = joinpath(checkpoints_dir, "AE1_ucond_512.safetensors")
-# load_decoder_weights_st!(decoder, decoder_weights_path)
+# load_decoder_weights_st!(decoder, "AE1_ucond_512.safetensors")
 # println("Decoder loaded (kept on CPU for sampling)")
 
 # ============================================================================

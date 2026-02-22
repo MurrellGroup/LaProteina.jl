@@ -26,6 +26,12 @@ Seven pretrained model variants (LD1-LD7) are available, covering unconditional 
 | LD6 | Unindexed motif scaffolding, all-atom | 256 |
 | LD7 | Unindexed motif scaffolding, tip-atom | 256 |
 
+To run end-to-end inference across all 7 models (downloads weights from HuggingFace, generates samples, computes geometry metrics):
+
+```bash
+julia --project=../run -t 4 scripts/infer_all_variants.jl
+```
+
 ### Branching Flows Extension
 
 The **BranchingScoreNetwork** extends the base ScoreNetwork with split and deletion heads, enabling variable-length protein generation via [Branching Flows](https://github.com/MurrellGroup/BranchingFlows.jl). During generation, residues can split (creating new positions) or be deleted, allowing the model to produce proteins of varying lengths from a single initial noise state.
@@ -117,7 +123,7 @@ The VAE encoder extracts latent representations from all-atom structures:
 
 ## Weights
 
-Pretrained weights are available as SafeTensors files, converted from the original NVIDIA PyTorch checkpoints:
+Pretrained weights are hosted on [HuggingFace](https://huggingface.co/MurrellLab/LaProteina.jl) and downloaded automatically when you call any `load_*_weights_st!` function. Downloaded files are cached locally by HuggingFaceApi.jl.
 
 ### Score Networks
 
@@ -152,20 +158,20 @@ using LaProteina
 using OnionTile  # GPU kernel overrides (loaded at runtime, not a package dep)
 using Flux: gpu
 
-# Load score network and decoder from SafeTensors
+# Load score network and decoder (downloaded from HuggingFace automatically)
 score_net = ScoreNetwork(
     n_layers=14, token_dim=768, n_heads=12,
     latent_dim=8, dim_cond=256, pair_dim=256,
     qk_ln=true, update_pair_repr=false, output_param=:v
 )
-load_score_network_weights_st!(score_net, "checkpoints/LD1_ucond_notri_512.safetensors")
+load_score_network_weights_st!(score_net, "LD1_ucond_notri_512.safetensors")
 
 decoder = DecoderTransformer(
     n_layers=12, token_dim=768, n_heads=12,
     latent_dim=8, dim_cond=128, pair_dim=256,
     qk_ln=true, update_pair_repr=false
 )
-load_decoder_weights_st!(decoder, "checkpoints/AE1_ucond_512.safetensors")
+load_decoder_weights_st!(decoder, "AE1_ucond_512.safetensors")
 
 # Generate 100-residue protein
 samples = sample_with_flowfusion(gpu(score_net), decoder, 100, 1;

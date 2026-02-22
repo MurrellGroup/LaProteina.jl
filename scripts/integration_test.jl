@@ -41,7 +41,7 @@ Random.seed!(42)
 # Configuration
 # ============================================================================
 const CHECKPOINT_PATH = "/home/claudey/safe_models/branching_OU_100k_20260216.jld2"
-const DECODER_PATH = joinpath(@__DIR__, "..", "..", "la-proteina", "checkpoints_laproteina", "AE1_ucond_512.safetensors")
+const DECODER_FILE = "AE1_ucond_512.safetensors"
 const SHARD_PATH = expanduser("~/shared_data/afdb_laproteina/precomputed_shards/train_shard_01.jld2")
 const LATENT_DIM = 8
 const BATCH_SIZE = 2
@@ -100,12 +100,12 @@ all_proteins = load_precomputed_shard(SHARD_PATH)
 println("  Loaded $(length(all_proteins)) proteins")
 
 # --- Load decoder (from sample_branching_full_OU.jl lines 72-78) ---
-println("  Loading decoder: $DECODER_PATH")
+println("  Loading decoder: $DECODER_FILE (from HuggingFace)")
 decoder = DecoderTransformer(
     n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
     dim_cond=128, latent_dim=LATENT_DIM, qk_ln=true, update_pair_repr=false
 )
-load_decoder_weights_st!(decoder, DECODER_PATH)
+load_decoder_weights_st!(decoder, DECODER_FILE)
 println("  Decoder loaded (CPU)")
 println()
 

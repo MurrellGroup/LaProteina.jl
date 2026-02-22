@@ -28,7 +28,6 @@ Random.seed!(42)
 # Configuration
 # ============================================================================
 
-const CHECKPOINTS_DIR = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina"
 const OUTPUT_DIR = "/home/claudey/JuProteina/inference_outputs"
 const N_SAMPLES = 2
 const N_STEPS = 400
@@ -232,22 +231,6 @@ function run_inference()
         model_dir = joinpath(OUTPUT_DIR, config.name)
         mkpath(model_dir)
 
-        sn_path = joinpath(CHECKPOINTS_DIR, config.sn_file)
-        dec_path = joinpath(CHECKPOINTS_DIR, config.dec_file)
-
-        if !isfile(sn_path)
-            msg = "SKIP: $(config.sn_file) not found"
-            println(msg)
-            println(summary_io, msg)
-            continue
-        end
-        if !isfile(dec_path)
-            msg = "SKIP: $(config.dec_file) not found"
-            println(msg)
-            println(summary_io, msg)
-            continue
-        end
-
         println("\n=== $(config.name): $(config.desc) ===")
         println("  Score network: $(config.sn_file)")
         println("  Decoder: $(config.dec_file)")
@@ -261,7 +244,7 @@ function run_inference()
                 qk_ln=true,
                 config.sn_kwargs...
             )
-            load_score_network_weights_st!(sn, sn_path; strict=config.strict)
+            load_score_network_weights_st!(sn, config.sn_file; strict=config.strict)
             sn_gpu = Flux.gpu(sn)
             println("  Score network loaded and moved to GPU")
 
@@ -272,7 +255,7 @@ function run_inference()
                     n_heads=12, dim_cond=128, latent_dim=LATENT_DIM,
                     qk_ln=true, update_pair_repr=false,
                 )
-                load_decoder_weights_st!(dec, dec_path)
+                load_decoder_weights_st!(dec, config.dec_file)
                 println("  Decoder loaded (new)")
                 dec
             end

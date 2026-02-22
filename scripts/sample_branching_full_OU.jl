@@ -13,7 +13,7 @@
 
 using LaProteina
 using OnionTile  # Activates cuTile CuArray overrides for Onion dispatch hooks
-using LaProteina: DecoderTransformer, load_decoder_weights!, samples_to_pdb
+using LaProteina: DecoderTransformer, load_decoder_weights_st!, samples_to_pdb
 using BranchingFlows
 using BranchingFlows: BranchingState, CoalescentFlow
 using ForwardBackward: ContinuousState, DiscreteState, tensor, OUBridgeExpVar
@@ -61,7 +61,6 @@ dev = CUDA.functional() ? gpu : identity
 println("Device: $(CUDA.functional() ? "GPU" : "CPU")")
 
 # Load model with full fine-tuned weights
-checkpoints_dir = "/home/claudey/JuProteina/la-proteina/checkpoints_laproteina"
 safe_models_dir = get(ENV, "SAFE_MODELS_DIR", "/home/claudey/safe_models")
 base = ScoreNetwork(
     n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
@@ -103,7 +102,7 @@ decoder = DecoderTransformer(
     n_layers=12, token_dim=768, pair_dim=256, n_heads=12,
     dim_cond=128, latent_dim=8, qk_ln=true, update_pair_repr=false
 )
-load_decoder_weights_st!(decoder, joinpath(checkpoints_dir, "AE1_ucond_512.safetensors"))
+load_decoder_weights_st!(decoder, "AE1_ucond_512.safetensors")
 println("Decoder loaded (CPU)")
 
 # ── Process configurations ──────────────────────────────────────────────
