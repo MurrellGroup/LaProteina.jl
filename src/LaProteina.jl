@@ -30,10 +30,16 @@ include("features/pair_features.jl")
 include("features/geometry.jl")
 include("features/feature_factory.jl")
 
+# Motif scaffolding (data pipeline — before nn/ since features reference constants)
+include("motif/contig_parser.jl")
+include("motif/motif_extraction.jl")
+include("motif/motif_batch.jl")
+
 # Neural network layers
 include("nn/adaptive_ln.jl")
 include("nn/pair_bias_attention.jl")
 include("nn/transition.jl")
+include("nn/triangular_update.jl")  # Must be before transformer_block.jl
 include("nn/transformer_block.jl")
 include("nn/score_network.jl")
 include("nn/score_network_efficient.jl")
@@ -52,6 +58,7 @@ include("flowfusion_sampling.jl")
 
 # Weight loading
 include("weights.jl")
+include("weights_safetensors.jl")
 
 # Training utilities
 include("training/precompute_encoder.jl")
@@ -71,7 +78,7 @@ include("branching/branching_inference.jl")
 export
     # Constants
     ATOM_TYPES, ATOM_TYPE_NUM, CA_INDEX,
-    RESTYPES, RESTYPE_ATOM37_MASK,
+    RESTYPES, RESTYPE_ATOM37_MASK, SIDECHAIN_TIP_ATOMS,
     aa_to_index, index_to_aa,
     RESTYPE_3TO1, RESTYPE_1TO3, ATOM_ORDER,
 
@@ -113,9 +120,15 @@ export
     OptionalCAPairDistFeature, CAPairDistFeature, RelSeqSepFeature,
     # Encoder pair features
     BackbonePairDistFeature, ResidueOrientationFeature, ChainIdxPairFeature,
+    # Motif features
+    MotifMaskFeature, MotifAbsCoordsFeature, MotifRelCoordsFeature, MotifSeqFeature,
+    MotifSidechainAngleFeature, MotifBackboneTorsionFeature, BulkAllAtomXmotifFeature,
+    MotifPairDistFeature,
     # Feature factory constructors
     score_network_seq_features, score_network_cond_features,
     score_network_pair_features, score_network_pair_cond_features,
+    score_network_seq_features_motif_tip, score_network_seq_features_motif_aa,
+    score_network_pair_features_motif_aa,
     encoder_seq_features, encoder_cond_features, encoder_pair_features,
     encoder_seq_features_legacy, encoder_pair_features_legacy,
     decoder_seq_features, decoder_pair_features, decoder_cond_features,
@@ -125,6 +138,8 @@ export
     PairBiasAttention, MultiHeadBiasedAttentionADALN,
     SwiGLU, SwiGLUTransition, TransitionADALN, ConditioningTransition,
     TransformerBlock, PairUpdate,
+    # Triangular updates
+    TriangleMultiplication, PairTransition,
 
     # Score Network
     ScoreNetwork, PairReprBuilder,
@@ -168,8 +183,15 @@ export
     # PDB I/O
     load_pdb, extract_ca_coords, batch_pdb_data, save_pdb,
 
-    # Weight loading
+    # Weight loading (NPZ)
     load_score_network_weights!, load_decoder_weights!, load_encoder_weights!,
+    # Weight loading (SafeTensors)
+    load_score_network_weights_st!, load_decoder_weights_st!, load_encoder_weights_st!,
+
+    # Motif scaffolding
+    ContigSegment, ScaffoldSegment, MotifSegment,
+    parse_contig, generate_scaffold_lengths, compute_motif_indices,
+    extract_motif_from_pdb, prepare_motif_batch,
 
     # Training utilities - precomputed encoder
     PrecomputedProteinNT, precompute_single_protein,

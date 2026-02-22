@@ -112,30 +112,47 @@ function (m::TransformerBlock)(x, pair_rep, cond, mask)
 end
 
 """
-    PairUpdate(token_dim::Int, pair_dim::Int; use_tri_mult::Bool=false)
+    PairUpdate(token_dim::Int, pair_dim::Int; use_tri_mult::Bool=false, tri_mult_c::Int=196)
 
 Update pair representation based on sequence representation.
-Simple version: outer product of sequence features projected to pair space.
+Port of PairReprUpdate from la-proteina.
+
+Base path: LayerNorm(seq) → Linear(token_dim → 2*pair_dim, split) → outer sum → add to pair.
+With `use_tri_mult=true`: additionally applies TriangleMultiplication (outgoing + incoming) and PairTransition.
 
 # Arguments
 - `token_dim`: Token/sequence dimension
 - `pair_dim`: Pair representation dimension
-- `use_tri_mult`: Whether to use triangle multiplicative updates (not implemented yet)
+- `use_tri_mult`: Whether to use triangle multiplicative updates
+- `tri_mult_c`: Hidden dimension for triangle multiplication (clamped to min(pair_dim, 196))
 """
 struct PairUpdate
-    outer_proj::Dense
-    pair_ln::PyTorchLayerNorm
+    seq_ln::PyTorchLayerNorm             # LayerNorm on sequence input
+    outer_proj::Dense                     # Projects seq to 2*pair_dim (split for outer sum)
+    tri_out::Union{TriangleMultiplication, Nothing}  # Outgoing triangle mult
+    tri_in::Union{TriangleMultiplication, Nothing}   # Incoming triangle mult
+    pair_transition::PairTransition       # Pair feedforward (always present)
 end
 
 Flux.@layer PairUpdate
 
-function PairUpdate(token_dim::Int, pair_dim::Int; use_tri_mult::Bool=false)
+function PairUpdate(token_dim::Int, pair_dim::Int; use_tri_mult::Bool=false, tri_mult_c::Int=196)
+    seq_ln = PyTorchLayerNorm(token_dim)
+    outer_proj = Dense(token_dim => 2 * pair_dim; bias=false)
+
     if use_tri_mult
-        @warn "Triangle multiplicative update not yet implemented, using simple outer product"
+        c_hidden = min(pair_dim, tri_mult_c)
+        tri_out = TriangleMultiplication(pair_dim; c_hidden=c_hidden, mode=:outgoing)
+        tri_in = TriangleMultiplication(pair_dim; c_hidden=c_hidden, mode=:incoming)
+    else
+        tri_out = nothing
+        tri_in = nothing
     end
-    outer_proj = Dense(token_dim * 2 => pair_dim; bias=false)
-    pair_ln = PyTorchLayerNorm(pair_dim)
-    return PairUpdate(outer_proj, pair_ln)
+
+    # PairTransition is always created (matches Python PairReprUpdate)
+    pair_transition = PairTransition(pair_dim; n=2)
+
+    return PairUpdate(seq_ln, outer_proj, tri_out, tri_in, pair_transition)
 end
 
 function (m::PairUpdate)(seq_rep, pair_rep, mask)
@@ -146,31 +163,50 @@ function (m::PairUpdate)(seq_rep, pair_rep, mask)
     D, L, B = size(seq_rep)
     D_pair = size(pair_rep, 1)
 
-    # Simple outer sum approach
-    # seq_i: [D, L, 1, B], seq_j: [D, 1, L, B]
-    seq_i = reshape(seq_rep, D, L, 1, B)
-    seq_j = reshape(seq_rep, D, 1, L, B)
+    # Compute pair mask
+    pair_mask = reshape(mask, L, 1, B) .* reshape(mask, 1, L, B)  # [L, L, B]
+    pair_mask_exp = reshape(pair_mask, 1, L, L, B)
 
-    # Concatenate along feature dim: [2D, L, L, B]
-    outer = cat(
-        repeat(seq_i, 1, 1, L, 1),
-        repeat(seq_j, 1, L, 1, 1);
-        dims=1
-    )
+    # Mask sequence input (matching Python: x = x * mask[..., None])
+    mask_seq_exp = reshape(mask, 1, L, B)  # [1, L, B]
+    seq_masked = seq_rep .* mask_seq_exp
 
-    # Project to pair dim
-    outer_flat = reshape(outer, 2*D, L*L*B)
-    update_flat = m.outer_proj(outer_flat)
-    update = reshape(update_flat, D_pair, L, L, B)
+    # LayerNorm on masked sequence, then project to 2*pair_dim and split
+    seq_normed = m.seq_ln(seq_masked)  # [D_token, L, B]
+    seq_flat = reshape(seq_normed, D, L * B)
+    x_proj = m.outer_proj(seq_flat)  # [2*D_pair, L*B]
+    x_proj = reshape(x_proj, 2 * D_pair, L, B)
 
-    # Add to existing pair rep with layer norm
-    new_pair = pair_rep .+ update
-    new_pair = m.pair_ln(new_pair)
+    # Split into two halves for outer sum
+    # Python: x_proj_1[:, None, :, :] + x_proj_2[:, :, None, :]
+    # x_proj_1 broadcasts over i (provides j component)
+    # x_proj_2 broadcasts over j (provides i component)
+    x_proj_1 = x_proj[1:D_pair, :, :]         # [D_pair, L, B]
+    x_proj_2 = x_proj[D_pair+1:end, :, :]     # [D_pair, L, B]
+
+    x_j = reshape(x_proj_1, D_pair, 1, L, B)  # broadcasts over i
+    x_i = reshape(x_proj_2, D_pair, L, 1, B)  # broadcasts over j
+    pair_rep = pair_rep .+ x_i .+ x_j
 
     # Apply pair mask
-    pair_mask = mask .* permutedims(mask, (2, 1, 3))  # [L, L, B]
-    pair_mask_expanded = reshape(pair_mask, 1, size(pair_mask)...)
-    return new_pair .* pair_mask_expanded
+    pair_rep = pair_rep .* pair_mask_exp
+
+    # Triangle multiplicative updates (residual)
+    if !isnothing(m.tri_out)
+        pair_rep = pair_rep .+ m.tri_out(pair_rep, pair_mask)
+        pair_rep = pair_rep .* pair_mask_exp
+    end
+
+    if !isnothing(m.tri_in)
+        pair_rep = pair_rep .+ m.tri_in(pair_rep, pair_mask)
+        pair_rep = pair_rep .* pair_mask_exp
+    end
+
+    # Pair transition (residual, always present)
+    pair_rep = pair_rep .+ m.pair_transition(pair_rep, pair_mask)
+    pair_rep = pair_rep .* pair_mask_exp
+
+    return pair_rep
 end
 
 """

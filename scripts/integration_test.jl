@@ -129,7 +129,7 @@ try
     base_model = ScoreNetwork(
         n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
         dim_cond=256, latent_dim=LATENT_DIM, output_param=:v,
-        qk_ln=true, update_pair_repr=false
+        qk_ln=true, update_pair_repr=false, cropped_flag=true
     )
 
     # Load base weights from branching checkpoint
@@ -362,7 +362,7 @@ try
     base = ScoreNetwork(
         n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
         dim_cond=256, latent_dim=LATENT_DIM, output_param=:v,
-        qk_ln=true, update_pair_repr=false
+        qk_ln=true, update_pair_repr=false, cropped_flag=true
     )
     model = BranchingScoreNetwork(base)
 

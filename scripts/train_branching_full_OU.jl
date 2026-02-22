@@ -162,7 +162,7 @@ println("\n=== Creating Model ===")
 base = ScoreNetwork(
     n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
     dim_cond=256, latent_dim=latent_dim, output_param=:v,
-    qk_ln=true, update_pair_repr=false
+    qk_ln=true, update_pair_repr=false, cropped_flag=true
 )
 
 # Wrap in BranchingScoreNetwork

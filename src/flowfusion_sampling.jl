@@ -232,6 +232,7 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
         latent_dim::Int=8,
         self_cond::Bool=true,
         dev=identity,
+        steps::Union{Nothing, AbstractVector{Float32}}=nothing,
         # BB_CA settings (la-proteina defaults)
         ca_schedule_mode::Symbol=:log,
         ca_schedule_p::Real=2.0,
@@ -249,9 +250,14 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
         ll_sc_scale_score::Real=1.0,
         ll_t_lim_ode::Real=0.98)
 
-    # Create RDNFlow processes with per-modality SDE parameters
+    # Create RDNFlow processes with per-modality SDE parameters AND schedules.
+    # Each process carries its own schedule (log for CA, power for latents).
+    # Flowfusion's step() applies schedule_transform per-modality for integration,
+    # and the MutableScoreNetworkWrapper applies it for model time conditioning.
     P_ca = RDNFlow(3;
         zero_com=true,
+        schedule=ca_schedule_mode,
+        schedule_param=ca_schedule_p,
         sde_gt_mode=ca_gt_mode,
         sde_gt_param=ca_gt_param,
         sc_scale_noise=ca_sc_scale_noise,
@@ -260,6 +266,8 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
     )
     P_ll = RDNFlow(latent_dim;
         zero_com=false,
+        schedule=ll_schedule_mode,
+        schedule_param=ll_schedule_p,
         sde_gt_mode=ll_gt_mode,
         sde_gt_param=ll_gt_param,
         sc_scale_noise=ll_sc_scale_noise,
@@ -275,13 +283,16 @@ function generate_with_flowfusion(score_net::ScoreNetwork, L::Int, B::Int;
     # Wrap as ContinuousStates (on CPU - Flowfusion operates on CPU)
     X0 = (ContinuousState(x0_ca), ContinuousState(x0_ll))
 
-    # Create time steps - use CA schedule (both modalities use same time steps in gen)
-    # Note: la-proteina uses different schedules per modality, but gen() uses shared steps
-    # We use CA schedule as primary since coordinates are more sensitive
-    steps = Float32.(get_schedule(ca_schedule_mode, nsteps; p=ca_schedule_p))
+    # Default: uniform steps. Each process's schedule_transform handles the
+    # per-modality time mapping in step() and in the model wrapper.
+    # This ensures CA gets log-scheduled time and latents get power-scheduled time.
+    if isnothing(steps)
+        steps = Float32.(range(0, 1, length=nsteps+1))
+    end
 
-    # Create model wrapper with device function
-    model = MutableScoreNetworkWrapper(score_net, L, B; self_cond=self_cond, dev=dev)
+    # Create model wrapper — processes enable per-modality schedule_transform
+    # so the model receives τ_ca(u) for CA and τ_ll(u) for latents.
+    model = MutableScoreNetworkWrapper(score_net, L, B; self_cond=self_cond, dev=dev, processes=(P_ca, P_ll))
 
     # Run generation with Flowfusion's gen()
     # gen() operates on CPU, model wrapper handles GPU transfer internally
@@ -321,11 +332,14 @@ function sample_with_flowfusion(score_net::ScoreNetwork, decoder::DecoderTransfo
     latents = flow_samples[:local_latents]
     mask = flow_samples[:mask]
 
-    # Decode to all-atom (move to device if needed)
+    # Decode to all-atom
+    # Detect whether decoder is on GPU by checking its first projection weight
+    dec_on_gpu = !(decoder.init_repr_factory.projection.weight isa Array)
+    dec_dev = dec_on_gpu ? dev : identity
     dec_input = Dict(
-        :z_latent => dev(latents),
-        :ca_coors => dev(ca_coords),
-        :mask => dev(mask)
+        :z_latent => dec_dev(latents),
+        :ca_coors => dec_dev(ca_coords),
+        :mask => dec_dev(mask)
     )
     dec_out = decoder(dec_input)
 
