@@ -18,14 +18,14 @@ score_net = ScoreNetwork(
     latent_dim=8, dim_cond=256, pair_dim=256,
     qk_ln=true, update_pair_repr=false, output_param=:v
 )
-load_score_network_weights!(score_net, "weights/score_network.npz")
+load_score_network_weights_st!(score_net, "checkpoints/LD1_ucond_notri_512.safetensors")
 
 decoder = DecoderTransformer(
     n_layers=12, token_dim=768, n_heads=12,
     latent_dim=8, dim_cond=128, pair_dim=256,
     qk_ln=true, update_pair_repr=false
 )
-load_decoder_weights!(decoder, "weights/decoder.npz")
+load_decoder_weights_st!(decoder, "checkpoints/AE1_ucond_512.safetensors")
 
 # Generate: L=100 residues, B=1 sample
 samples = sample_with_flowfusion(gpu(score_net), decoder, 100, 1;
@@ -102,8 +102,8 @@ base = ScoreNetwork(n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
                     qk_ln=true, update_pair_repr=false)
 model = BranchingScoreNetwork(base)
 
-# Load weights
-weights = load("weights/branching_full.jld2")
+# Load weights (JLD2 from Julia training)
+weights = load("branching_full.jld2")
 Flux.loadmodel!(model.base, weights["base"])
 Flux.loadmodel!(model.indel_time_proj, weights["indel_time_proj"])
 Flux.loadmodel!(model.split_head, weights["split_head"])
@@ -206,7 +206,7 @@ steps = step_func.(0f0:Float32(1/step_number):1f0)
 
 This gives denser steps near t=0 and t=1 where the flow changes most rapidly.
 
-See `test/test_branching_full_sampling.jl` for a complete example.
+See `scripts/sample_branching_full_OU.jl` for a complete example with OUBridgeExpVar processes and comparison modes.
 
 ## Decoding to All-Atom Structures
 
@@ -263,7 +263,7 @@ Coordinates are automatically converted from nm back to Angstroms during PDB wri
 3. **SDE noise**: The default `sc_scale_noise=0.1` provides good diversity. Set to 0 for deterministic ODE sampling.
 4. **Self-conditioning**: Always enable (`self_cond=true`). Quality degrades significantly without it.
 5. **CA-CA distances**: Healthy proteins have mean CA-CA distance ~0.38 nm (3.8 Angstrom). Check this as a quality metric.
-6. **Branching results**: Starting from Poisson(100) initial lengths, expect final lengths of 100-180 residues with healthy split/delete dynamics.
+6. **Branching results**: Use `--start-length 0` (grow from L=1) for best results. Starting from Poisson(100) can cause length explosion with some checkpoints.
 
 ## Sampling Results
 
@@ -278,8 +278,8 @@ With the fine-tuned BranchingScoreNetwork (200k iterations, BS=8, Muon):
 | File | Purpose |
 |------|---------|
 | `src/flowfusion_sampling.jl` | `MutableScoreNetworkWrapper`, `generate_with_flowfusion`, `sample_with_flowfusion` |
-| `src/inference.jl` | Legacy sampling (pre-Flowfusion) |
+| `src/inference.jl` | Time schedules, PDB saving utilities |
 | `src/branching/branching_inference.jl` | `BranchingScoreNetworkWrapper`, `create_branching_processes`, `generate_with_branching` |
 | `src/data/pdb_loading.jl` | `save_pdb` |
-| `test/test_gpu_sampling.jl` | Base model sampling test |
-| `test/test_branching_full_sampling.jl` | Branching sampling with cosine steps |
+| `scripts/infer_all_variants.jl` | Inference for all LD1-LD7 model variants |
+| `scripts/sample_branching_full_OU.jl` | Variable-length sampling with OUBridgeExpVar |

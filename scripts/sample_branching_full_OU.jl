@@ -48,7 +48,7 @@ end
 ca_v0_override = parse_arg(ARGS, "--ca-v0")
 ll_v0_override = parse_arg(ARGS, "--ll-v0")
 compare_n = let v = parse_arg(ARGS, "--compare"); v === nothing ? nothing : Int(v) end
-start_length_param = let v = parse_arg(ARGS, "--start-length"); v === nothing ? 100 : Int(v) end
+start_length_param = let v = parse_arg(ARGS, "--start-length"); v === nothing ? 0 : Int(v) end
 weights_override = parse_string_arg(ARGS, "--weights")
 
 Random.seed!(42)

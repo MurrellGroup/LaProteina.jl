@@ -222,25 +222,11 @@ end
 
 Only the projection Dense layers and transformer parameters are differentiated. The raw feature extraction is not part of the computational graph.
 
-## Data Transforms (`src/data/transforms.jl`)
-
-Available transforms for data augmentation:
-
-| Transform | Description |
-|-----------|-------------|
-| `random_rotation_matrix()` | Sample uniform SO(3) rotation |
-| `random_rotation(coords)` | Apply random rotation to coordinates |
-| `center_coords(coords)` | Center at center of mass |
-| `add_noise(coords, sigma)` | Add Gaussian noise |
-| `random_crop(data, max_length)` | Crop to maximum length |
-| `apply_transforms(data, transforms)` | Chain multiple transforms |
-
 ## Key Files
 
 | File | Purpose |
 |------|---------|
 | `src/data/pdb_loading.jl` | `load_pdb()`, `extract_ca_coords()`, `batch_pdb_data()`, `save_pdb()` |
-| `src/data/transforms.jl` | Data augmentation transforms |
 | `src/training/precompute_encoder.jl` | `PrecomputedProteinNT`, `precompute_single_protein()`, sharding, loading |
 | `src/branching/branching_states.jl` | `protein_to_branching_state()`, `X0_sampler_laproteina()` |
 | `src/nn/score_network.jl` | `ScoreNetworkRawFeatures`, `extract_raw_features()`, `forward_from_raw_features()` |

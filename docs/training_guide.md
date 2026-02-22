@@ -8,7 +8,7 @@ Complete reference for training LaProteina's BranchingScoreNetwork.
 - Julia with 8+ threads (`julia -t 8`)
 - cuTile mode enabled (default; do NOT set `LAPROTEINA_NOCUTILE` or `LAPROTEINA_NO_OVERRIDES`)
 - Precomputed encoder shards (see Data Preparation below)
-- Pretrained weights: `score_network.npz` in `weights/`
+- Pretrained weights (SafeTensors or JLD2 checkpoint)
 
 ## Data Preparation
 
@@ -76,10 +76,10 @@ During training, latents are sampled: `z = z_mean + randn() * exp(z_log_scale)`.
 
 ## Training Script
 
-The main training script is `scripts/train_branching_full.jl`:
+The main training script is `scripts/train_branching_full_OU.jl`:
 
 ```bash
-julia -t 8 scripts/train_branching_full.jl
+julia --project=../run -t 8 scripts/train_branching_full_OU.jl
 ```
 
 ### Current Hyperparameters
@@ -299,9 +299,8 @@ Stage 1 prevents the randomly-initialized indel heads from destabilizing the pre
 
 | File | Purpose |
 |------|---------|
-| `scripts/train_branching_full.jl` | Main training script |
+| `scripts/train_branching_full_OU.jl` | Main training script |
 | `scripts/precompute_all_training_data.jl` | Data precomputation |
-| `scripts/plot_training.jl` | Training loss visualization |
 | `src/branching/branching_training.jl` | softclamp, loss utilities |
 | `src/branching/branching_states.jl` | protein_to_branching_state, X0_sampler_laproteina |
 | `src/training/precompute_encoder.jl` | PrecomputedProteinNT, sharding |

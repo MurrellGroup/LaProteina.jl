@@ -123,11 +123,20 @@ sn = ScoreNetwork(
 ### LD6: Unindexed Motif Scaffolding, All-Atom
 
 Like LD4 but with unindexed motif conditioning (motif position is not fixed in the
-output sequence). Uses a different network architecture class.
+output sequence). Uses `motif_mode=:uidx` with a separate projection layer for compact
+motif tokens.
 
 - **Checkpoint**: `LD6_motif_uidx_aa.safetensors`
 - **Decoder**: AE3
-- **Status**: Architecture class `LocalLatentsTransformerMotifUidx` not yet implemented in Julia. Currently runs unconditionally.
+- **Architecture**: `motif_mode=:uidx` (unindexed motif projection)
+
+```julia
+sn = ScoreNetwork(
+    n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
+    dim_cond=256, latent_dim=8, output_param=:v, qk_ln=true,
+    motif_mode=:uidx,
+)
+```
 
 ### LD7: Unindexed Motif Scaffolding, Tip-Atom
 
@@ -135,7 +144,15 @@ Like LD5 but with unindexed motif conditioning.
 
 - **Checkpoint**: `LD7_motif_uidx_tip.safetensors`
 - **Decoder**: AE3
-- **Status**: Same as LD6 (unindexed architecture not yet in Julia).
+- **Architecture**: Same as LD6 (`motif_mode=:uidx`)
+
+```julia
+sn = ScoreNetwork(
+    n_layers=14, token_dim=768, pair_dim=256, n_heads=12,
+    dim_cond=256, latent_dim=8, output_param=:v, qk_ln=true,
+    motif_mode=:uidx,
+)
+```
 
 ## Sampling Parameters
 
