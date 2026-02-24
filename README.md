@@ -371,6 +371,10 @@ If you use this code, please cite the original La-Proteina paper:
 }
 ```
 
+## Known Issues
+
+- **CUDA error 700 (illegal memory access)** — Sporadic crashes during long training runs, suspected flash attention bug with non-tile-aligned sequence lengths in OnionTile. Observed during branching model training at ~26k iterations. Non-deterministic. Workaround: checkpoint frequently and resume.
+
 ## License
 
 This Julia implementation follows the same license as the original [La-Proteina repository](https://github.com/NVIDIA-Digital-Bio/la-proteina). Model weights are licensed under the [NVIDIA Open Model License](https://github.com/NVIDIA-Digital-Bio/la-proteina/blob/main/LICENSE/license_weights.txt).

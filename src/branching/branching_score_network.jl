@@ -438,9 +438,9 @@ function forward_branching_from_raw_features_gpu(model::BranchingScoreNetwork,
     end
 
     # === KEY OPTIMIZATION: Pre-normalize pair features once ===
+    first_pba = base.transformer_layers[1].mha.mha
+    pair_eps = first_pba.pair_norm.ϵ
     if !base.update_pair_repr
-        first_pba = base.transformer_layers[1].mha.mha
-        pair_eps = first_pba.pair_norm.ϵ
         pair_normed = LaProteina.pytorch_normalise(pair_rep; dims=1, eps=pair_eps)
     else
         pair_normed = nothing
@@ -457,7 +457,9 @@ function forward_branching_from_raw_features_gpu(model::BranchingScoreNetwork,
 
         if base.update_pair_repr && i < base.n_layers
             if !isnothing(base.pair_update_layers[i])
-                pair_rep = base.pair_update_layers[i](seqs, pair_rep, mask)
+                # Gradient checkpointing: recompute PairUpdate during backward instead
+                # of storing activations. Saves ~30-50% GPU memory for tri models.
+                pair_rep = safe_checkpointed(base.pair_update_layers[i], seqs, pair_rep, mask)
                 pair_normed = LaProteina.pytorch_normalise(pair_rep; dims=1, eps=pair_eps)
             end
         end
