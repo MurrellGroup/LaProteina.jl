@@ -23,7 +23,11 @@ function get_time_embedding(t::AbstractVector{T}, edim::Int; max_positions::Int=
 
     # exp(-log(max_positions) * k / (half_dim - 1)) for k = 0, 1, ..., half_dim-1
     log_max = T(log(max_positions))
-    k = T.(0:(half_dim-1))
+    # Create k on the same device as t using similar + broadcasting
+    k_cpu = T.(0:(half_dim-1))
+    # Adapt to same device as t
+    k = similar(t, half_dim)
+    copyto!(k, k_cpu)
     emb_scale = exp.(-log_max .* k ./ T(half_dim - 1))  # [half_dim]
 
     # Outer product: t_scaled[b] * emb_scale[k]
@@ -36,7 +40,9 @@ function get_time_embedding(t::AbstractVector{T}, edim::Int; max_positions::Int=
 
     # Handle odd edim by padding with zeros
     if edim % 2 == 1
-        result = vcat(result, zeros(T, 1, length(t)))
+        pad = similar(t, 1, length(t))
+        fill!(pad, zero(T))
+        result = vcat(result, pad)
     end
 
     return result
@@ -117,7 +123,8 @@ Broadcast time embedding [edim, B] to sequence length [edim, L, B].
 """
 function broadcast_time_embedding(t_emb::AbstractMatrix{T}, L::Int) where T
     edim, B = size(t_emb)
-    return reshape(t_emb, edim, 1, B) .* ones(T, 1, L, 1)
+    # Use repeat to avoid CPU/GPU mixing
+    return repeat(reshape(t_emb, edim, 1, B), 1, L, 1)
 end
 
 # Time sampling utilities for flow matching

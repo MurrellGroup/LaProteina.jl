@@ -7,16 +7,17 @@ using Flux
     EncoderTransformer(;
         n_layers::Int=12,
         token_dim::Int=768,
-        pair_dim::Int=64,
+        pair_dim::Int=256,
         n_heads::Int=12,
-        dim_cond::Int=256,
+        dim_cond::Int=128,
         latent_dim::Int=8,
-        qk_ln::Bool=false,
-        update_pair_repr::Bool=true,
+        qk_ln::Bool=true,
+        update_pair_repr::Bool=false,
         update_pair_every_n::Int=3,
         use_tri_mult::Bool=false)
 
 VAE Encoder transformer with pair-biased attention.
+Defaults match Python nn_130m.yaml encoder config.
 
 # Architecture
 1. Feature factories for initial seq/pair representations and conditioning
@@ -27,12 +28,12 @@ VAE Encoder transformer with pair-biased attention.
 # Arguments
 - `n_layers`: Number of transformer layers (default 12)
 - `token_dim`: Token/sequence dimension (default 768)
-- `pair_dim`: Pair representation dimension (default 64)
+- `pair_dim`: Pair representation dimension (default 256)
 - `n_heads`: Number of attention heads (default 12)
-- `dim_cond`: Conditioning dimension (default 256)
+- `dim_cond`: Conditioning dimension (default 128)
 - `latent_dim`: Output latent dimension (default 8)
-- `qk_ln`: Whether to use Q/K layer norms (default false)
-- `update_pair_repr`: Whether to update pair representation (default true)
+- `qk_ln`: Whether to use Q/K layer norms (default true)
+- `update_pair_repr`: Whether to update pair representation (default false)
 - `update_pair_every_n`: Update pair every N layers (default 3)
 - `use_tri_mult`: Use triangle multiplicative in pair updates (default false)
 """
@@ -65,12 +66,12 @@ Flux.@layer EncoderTransformer
 function EncoderTransformer(;
         n_layers::Int=12,
         token_dim::Int=768,
-        pair_dim::Int=64,
+        pair_dim::Int=256,
         n_heads::Int=12,
-        dim_cond::Int=256,
+        dim_cond::Int=128,
         latent_dim::Int=8,
-        qk_ln::Bool=false,
-        update_pair_repr::Bool=true,
+        qk_ln::Bool=true,
+        update_pair_repr::Bool=false,
         update_pair_every_n::Int=3,
         use_tri_mult::Bool=false)
 

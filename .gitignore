@@ -11,7 +11,22 @@ Manifest.toml
 # Generated files
 generated_structures/
 test/samples/
+test/samples_*/
+test/afdb_vae_comparison/
 test/*.npy
+
+# Temporaries (outputs, one-shot scripts, samples, logs)
+temporaries/
+
+# Training outputs and checkpoints
+outputs/
+good_runs/
+
+# Sample PDBs
+scripts/samples_*/
+
+# Logs
+*.log
 
 # IDE
 .vscode/
