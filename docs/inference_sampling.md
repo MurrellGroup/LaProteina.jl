@@ -273,6 +273,66 @@ With the fine-tuned BranchingScoreNetwork (200k iterations, BS=8, Muon):
 - Mean CA-CA distances: 0.37-0.38 nm (expected ~0.38 nm)
 - Generation time: ~2 minutes per sample (500 cosine steps on GPU)
 
+## Trajectory Recording and Visualization
+
+The triangle-update sampling script (`scripts/sample_branching_full_OU_tri.jl`) supports recording full trajectories with the `--trajectory` flag. At every sampling step, the decoder is run on both Xt (current state) and X̂₁ (model prediction) to produce all-atom coordinates, amino acid types, and atom masks. These are saved as JLD2 files alongside the PDB outputs.
+
+### Recording trajectories
+
+```bash
+julia --project=/home/claudey/JuProteina/run -t 4 scripts/sample_branching_full_OU_tri.jl \
+    --ca-v0 40 --ll-v0 40 --n-samples 20 --trajectory --seed 123 \
+    --output-dir /path/to/output
+```
+
+**Flags:**
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ca-v0 V` | 150 | CA process noise amplitude (v0 parameter for OUBridgeExpVar) |
+| `--ll-v0 V` | 50 | Latent process noise amplitude |
+| `--n-samples N` | 10 | Number of samples to generate |
+| `--trajectory` | off | Save per-step trajectory JLD2 (decoder runs every step) |
+| `--output-dir DIR` | auto | Override output directory (default: auto from v0 values) |
+| `--seed S` | 42 | Random seed |
+| `--start-length P` | 0 | Poisson parameter for initial length (actual L = Poisson(P) + 1) |
+| `--compare N` | off | Comparison mode: N samples each with original and modified processes |
+| `--weights PATH` | default | Override model weights checkpoint |
+
+### Trajectory JLD2 format
+
+Each trajectory file contains:
+```
+frames[i] = Dict(
+    :xt_ca => [3, L_i],             # current state CA coords (nm)
+    :x1hat_ca => [3, L_i],          # predicted clean CA coords (nm)
+    :xt_all_atom => [3, 37, L_i],   # decoder output for Xt (nm)
+    :xt_atom_mask => [37, L_i],     # atom presence mask for Xt
+    :x1hat_all_atom => [3, 37, L_i],# decoder output for X̂₁ (nm)
+    :x1hat_atom_mask => [37, L_i],  # atom presence mask for X̂₁
+    :t => Float32,                   # time value
+    :step => Int,                    # step index
+    :L => Int                        # current sequence length
+)
+final_decoder = Dict(
+    :all_atom_coords => [3, 37, L],  # final structure all-atom
+    :aatype => [L],                  # amino acid types
+    :atom_mask => [37, L],           # atom mask
+    :ca_coords => [3, L]             # final CA coords (nm)
+)
+metadata = Dict("initial_length" => ..., "final_length" => ..., "nsteps" => ...)
+```
+
+### Visualizing trajectories
+
+The standalone visualization script renders two-panel videos (Xt left, X̂₁ right) with ball-and-stick all-atom rendering throughout, and a ribbon+sidechain showcase at the end:
+
+```bash
+xvfb-run julia --project=/home/claudey/JuProteina/run scripts/visualize_trajectory.jl \
+    <trajectory.jld2> [output.mp4]
+```
+
+Requires GLMakie, ProtPlot, Colors, and a virtual framebuffer (Xvfb) for headless rendering.
+
 ## Key Files
 
 | File | Purpose |
@@ -283,3 +343,5 @@ With the fine-tuned BranchingScoreNetwork (200k iterations, BS=8, Muon):
 | `src/data/pdb_loading.jl` | `save_pdb` |
 | `scripts/infer_all_variants.jl` | Inference for all LD1-LD7 model variants |
 | `scripts/sample_branching_full_OU.jl` | Variable-length sampling with OUBridgeExpVar |
+| `scripts/sample_branching_full_OU_tri.jl` | Triangle-update variant with trajectory recording |
+| `scripts/visualize_trajectory.jl` | Two-panel trajectory video rendering (GLMakie + ProtPlot) |
