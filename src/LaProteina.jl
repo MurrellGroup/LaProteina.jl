@@ -191,7 +191,8 @@ export
     extract_motif_from_pdb, prepare_motif_batch,
 
     # Training utilities - precomputed encoder
-    PrecomputedProteinNT, precompute_single_protein,
+    PrecomputedProteinNT, PrecomputedProteinMotifNT,
+    precompute_single_protein, precompute_single_protein_motif,
     precompute_dataset_sharded, precompute_dataset_single,
     load_precomputed_shard, batch_from_precomputed,
 

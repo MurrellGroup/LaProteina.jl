@@ -12,6 +12,14 @@ const PrecomputedProteinNT = NamedTuple{
     Tuple{Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32}}
 }
 
+# Extended type for motif-conditioned training (LD4/AE3)
+# Adds all-atom coordinates, atom mask, and residue types needed for motif features
+const PrecomputedProteinMotifNT = NamedTuple{
+    (:ca_coords, :z_mean, :z_log_scale, :mask, :atom37_coords, :atom37_mask, :aatype),
+    Tuple{Matrix{Float32}, Matrix{Float32}, Matrix{Float32}, Vector{Float32},
+          Array{Float32, 3}, Matrix{Bool}, Vector{Int}}
+}
+
 """
     precompute_single_protein(encoder_cpu, encoder_gpu, data::Dict)
 
@@ -66,6 +74,65 @@ function precompute_single_protein(encoder_cpu::EncoderTransformer,
         )
     catch e
         @warn "Failed to encode protein: $e"
+        return nothing
+    end
+end
+
+"""
+    precompute_single_protein_motif(encoder_cpu, encoder_gpu, data::Dict)
+
+Precompute encoder output for a single protein, including all-atom data for motif conditioning.
+Returns a PrecomputedProteinMotifNT with additional fields:
+- atom37_coords: [3, 37, L] all-atom coordinates in nm (centered same as CA)
+- atom37_mask: [37, L] atom presence mask (Bool)
+- aatype: [L] residue types (Int, 1-20)
+"""
+function precompute_single_protein_motif(encoder_cpu::EncoderTransformer,
+                                          encoder_gpu::EncoderTransformer,
+                                          data::Dict)
+    try
+        L = length(data[:aatype])
+
+        # Build encoder batch for single sample
+        encoder_batch = Dict{Symbol, Any}(
+            :coords => Float32.(reshape(data[:coords], 3, 37, L, 1)),
+            :coord_mask => Float32.(reshape(data[:atom_mask], 37, L, 1)),
+            :residue_type => reshape(data[:aatype], L, 1),
+            :mask => Float32.(reshape(data[:residue_mask], L, 1)),
+        )
+
+        # Extract CA coords and center
+        ca_coords = encoder_batch[:coords][:, CA_INDEX, :, 1]  # [3, L]
+        com = mean(ca_coords, dims=2)  # center of mass
+        ca_coords_centered = ca_coords .- com
+
+        # Center all-atom coordinates with same COM
+        atom37_coords = Float32.(data[:coords]) .- com  # [3, 37, L]
+
+        # Run encoder (features on CPU, transformer on GPU)
+        features_cpu = extract_encoder_features(encoder_cpu, encoder_batch)
+        features_gpu = EncoderRawFeatures(
+            gpu(features_cpu.seq_raw),
+            gpu(features_cpu.cond_raw),
+            gpu(features_cpu.pair_raw),
+            gpu(features_cpu.mask)
+        )
+
+        enc_result = encode_from_features_gpu(encoder_gpu, features_gpu)
+        z_mean = cpu(enc_result[:mean][:, :, 1])  # [latent_dim, L]
+        z_log_scale = cpu(enc_result[:log_scale][:, :, 1])  # [latent_dim, L]
+
+        return (
+            ca_coords = Float32.(ca_coords_centered),
+            z_mean = Float32.(z_mean),
+            z_log_scale = Float32.(z_log_scale),
+            mask = Float32.(data[:residue_mask]),
+            atom37_coords = Float32.(atom37_coords),       # [3, 37, L]
+            atom37_mask = Bool.(data[:atom_mask]),           # [37, L]
+            aatype = Int.(data[:aatype])                     # [L]
+        )
+    catch e
+        @warn "Failed to encode protein (motif): $e"
         return nothing
     end
 end
