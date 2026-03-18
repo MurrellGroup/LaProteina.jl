@@ -2,6 +2,12 @@
 # Sample from the fully fine-tuned branching model (OUBridgeExpVar processes)
 # with cosine time steps. Loads final weights from the most recent training run.
 #
+# IMPORTANT: Weight selection for Poisson(0) (L=1 start) sampling:
+#   The post-warmdown/cooldown checkpoint MUST be used for Poisson(0) starts.
+#   The pre-warmdown 100k checkpoint (branching_OU_100k_20260216.jld2) collapses
+#   to L=0 from L=1. Only the cooldown weights produce valid samples:
+#     branching_OU_cooldown_20260219_232939/branching_full_final.jld2
+#
 # Usage:
 #   julia -t 4 scripts/sample_branching_full_OU.jl                    # original (CA v0=150, LL v0=50)
 #   julia -t 4 scripts/sample_branching_full_OU.jl --annealed         # half-noise (CA v0=37.5, LL v0=12.5)
@@ -10,6 +16,8 @@
 #   julia -t 4 scripts/sample_branching_full_OU.jl --ca-v0 75 --ll-v0 25  # both custom
 #   julia -t 4 scripts/sample_branching_full_OU.jl --compare 5 --ca-v0 55 --ll-v0 40  # 5 original + 5 modified
 #   julia -t 4 scripts/sample_branching_full_OU.jl --start-length 0                   # start from L=1 (Poisson(0))
+#   julia -t 4 scripts/sample_branching_full_OU.jl --ca-v0 40 --ll-v0 40 --n-samples 20 --trajectory --output-dir /path
+#   julia -t 4 scripts/sample_branching_full_OU.jl --seed 123
 
 using LaProteina
 using OnionTile  # Activates cuTile CuArray overrides for Onion dispatch hooks
@@ -50,8 +58,12 @@ ll_v0_override = parse_arg(ARGS, "--ll-v0")
 compare_n = let v = parse_arg(ARGS, "--compare"); v === nothing ? nothing : Int(v) end
 start_length_param = let v = parse_arg(ARGS, "--start-length"); v === nothing ? 0 : Int(v) end
 weights_override = parse_string_arg(ARGS, "--weights")
+output_dir_override = parse_string_arg(ARGS, "--output-dir")
+n_samples_override = let v = parse_arg(ARGS, "--n-samples"); v === nothing ? nothing : Int(v) end
+save_trajectory = "--trajectory" in ARGS
+seed_val = let v = parse_arg(ARGS, "--seed"); v === nothing ? 42 : Int(v) end
 
-Random.seed!(42)
+Random.seed!(seed_val)
 
 println("=" ^ 70)
 println("Branching Full Model Sampling - OUBridgeExpVar - Cosine Steps")
@@ -74,8 +86,8 @@ model = BranchingScoreNetwork(base)
 full_weights_path = if weights_override !== nothing
     weights_override
 else
-    safe_weights_path = joinpath(safe_models_dir, "branching_OU_100k_20260216.jld2")
-    isfile(safe_weights_path) ? safe_weights_path : joinpath(weights_dir, "branching_full.jld2")
+    cooldown_path = "/home/claudey/JuProteina/ArchivedJuProteina/good_runs/branching_OU_cooldown_20260219_232939/branching_full_final.jld2"
+    isfile(cooldown_path) ? cooldown_path : joinpath(safe_models_dir, "branching_OU_100k_20260216.jld2")
 end
 println("Loading weights from: $full_weights_path")
 weights = load(full_weights_path)
@@ -174,7 +186,8 @@ println()
 # ── Sampling function ───────────────────────────────────────────────────
 
 function run_samples(n_samples, output_dir, prefix, P_flow, wrapper, decoder,
-                     steps, nsteps, latent_dim; poisson_param=100)
+                     steps, nsteps, latent_dim; poisson_param=100,
+                     save_trajectory::Bool=false)
     mkpath(output_dir)
     for sample_idx in 1:n_samples
         println("--- $prefix sample $sample_idx ---")
@@ -182,6 +195,9 @@ function run_samples(n_samples, output_dir, prefix, P_flow, wrapper, decoder,
         initial_length = 1 + rand(Poisson(poisson_param))
         reset_self_conditioning!(wrapper)
         X0 = create_initial_state(initial_length, latent_dim)
+
+        # Trajectory recording
+        traj_frames = save_trajectory ? Vector{Dict{Symbol,Any}}() : nothing
 
         Xt = X0
         for i in 1:nsteps
@@ -197,6 +213,46 @@ function run_samples(n_samples, output_dir, prefix, P_flow, wrapper, decoder,
             end
 
             hat = wrapper(t1, Xt)
+
+            # Record trajectory frame with all-atom decoder outputs
+            if save_trajectory
+                xt_ca = dropdims(tensor(Xt.state[1].S), dims=3)   # [3, L]
+                xt_ll = dropdims(tensor(Xt.state[2].S), dims=3)   # [latent_dim, L]
+                x1hat_ca = dropdims(tensor(hat[1][1]), dims=3)     # [3, L]
+                x1hat_ll = dropdims(tensor(hat[1][2]), dims=3)     # [latent_dim, L]
+
+                frame = Dict{Symbol,Any}(
+                    :xt_ca => Array(xt_ca),
+                    :x1hat_ca => Array(x1hat_ca),
+                    :t => Float32(t1),
+                    :step => i,
+                    :L => L_current
+                )
+
+                # Decode x1hat → all-atom (every step)
+                x1h_ca3 = reshape(Array(x1hat_ca), 3, L_current, 1)
+                x1h_ll3 = reshape(Array(x1hat_ll), latent_dim, L_current, 1)
+                msk = ones(Float32, L_current, 1)
+                d1 = decoder(Dict(:z_latent => x1h_ll3, :ca_coors => x1h_ca3, :mask => msk))
+                frame[:x1hat_all_atom]  = Array(d1[:coors][:,:,:,1])     # [3,37,L]
+                frame[:x1hat_aatype]    = Array(d1[:aatype_max][:,1])    # [L]
+                frame[:x1hat_atom_mask] = Array(d1[:atom_mask][:,:,1])   # [37,L]
+
+                # Also decode Xt → all-atom (every step)
+                xt_ca3 = reshape(Array(xt_ca), 3, L_current, 1)
+                xt_ll3 = reshape(Array(xt_ll), latent_dim, L_current, 1)
+                d0 = decoder(Dict(:z_latent => xt_ll3, :ca_coors => xt_ca3, :mask => msk))
+                frame[:xt_all_atom]  = Array(d0[:coors][:,:,:,1])
+                frame[:xt_aatype]    = Array(d0[:aatype_max][:,1])
+                frame[:xt_atom_mask] = Array(d0[:atom_mask][:,:,1])
+
+                push!(traj_frames, frame)
+
+                if i % 100 == 0
+                    println("    (decoder done for step $i)")
+                end
+            end
+
             Xt = Flowfusion.step(P_flow, Xt, hat, t1, t2)
 
             L_current = size(Xt.groupings, 1)
@@ -242,6 +298,28 @@ function run_samples(n_samples, output_dir, prefix, P_flow, wrapper, decoder,
         pdb_prefix = "$(prefix)_$(sample_idx)"
         samples_to_pdb(samples, output_dir; prefix=pdb_prefix, save_all_atom=true)
 
+        # Save trajectory JLD2 if requested
+        if save_trajectory && traj_frames !== nothing && !isempty(traj_frames)
+            traj_path = joinpath(output_dir, "$(pdb_prefix)_trajectory.jld2")
+            final_decoder = Dict{Symbol,Any}(
+                :all_atom_coords => Array(dec_out[:coors][:, :, :, 1]),  # [3, 37, L]
+                :aatype => Array(dec_out[:aatype_max][:, 1]),            # [L]
+                :atom_mask => Array(dec_out[:atom_mask][:, :, 1]),       # [37, L]
+                :ca_coords => Array(ca_coords)                          # [3, L]
+            )
+            metadata = Dict{String,Any}(
+                "initial_length" => initial_length,
+                "final_length" => final_L,
+                "nsteps" => nsteps
+            )
+            jldsave(traj_path;
+                frames=traj_frames,
+                final_decoder=final_decoder,
+                metadata=metadata
+            )
+            println("  Trajectory saved: $traj_path ($(length(traj_frames)) frames)")
+        end
+
         aatype = dec_out[:aatype_max][:, 1]
         seq = join([index_to_aa(aa) for aa in aatype])
         println("  Sequence: $(seq[1:min(40, length(seq))])...")
@@ -277,14 +355,16 @@ if compare_n !== nothing
     println("── Original process ($n samples) ──")
     println("  CA: $(ca_label_str(150f0))  LL: $(ll_label_str(50f0))")
     run_samples(n, output_dir, "original", P_orig, wrapper, decoder,
-                steps, nsteps, latent_dim; poisson_param=start_length_param)
+                steps, nsteps, latent_dim; poisson_param=start_length_param,
+                save_trajectory=save_trajectory)
 
     # Modified process
     P_mod = CoalescentFlow((make_ca_process(mod_ca_v0), make_ll_process(mod_ll_v0), P_idx), branch_time_dist)
     println("── Modified process ($n samples) ──")
     println("  CA: $(ca_label_str(mod_ca_v0))  LL: $(ll_label_str(mod_ll_v0))")
     run_samples(n, output_dir, "modified", P_mod, wrapper, decoder,
-                steps, nsteps, latent_dim; poisson_param=start_length_param)
+                steps, nsteps, latent_dim; poisson_param=start_length_param,
+                save_trajectory=save_trajectory)
 
     println("=" ^ 70)
     println("Comparison samples saved to: $output_dir")
@@ -306,11 +386,16 @@ else
     else
         ""
     end
-    output_dir = joinpath("/home/claudey/JuProteina/inference_outputs", "branching_full_OU$output_suffix")
+    output_dir = if output_dir_override !== nothing
+        output_dir_override
+    else
+        joinpath("/home/claudey/JuProteina/inference_outputs", "branching_full_OU$output_suffix")
+    end
 
-    n_samples = 10
+    n_samples = n_samples_override !== nothing ? n_samples_override : 10
     run_samples(n_samples, output_dir, "OU_cosine", P, wrapper, decoder,
-                steps, nsteps, latent_dim; poisson_param=start_length_param)
+                steps, nsteps, latent_dim; poisson_param=start_length_param,
+                save_trajectory=save_trajectory)
 
     println("=" ^ 70)
     println("Samples saved to: $output_dir")

@@ -142,7 +142,7 @@ function Flux.loadmodel!(dst::ScoreNetwork, src::NamedTuple;
                 if getfield(dst, f) !== nothing && !(f in (:n_layers, :update_pair_repr, :output_param))]
     if strict
         missing_in_src = setdiff(dst_keys, src_keys)
-        missing_in_dst = setdiff([k for k in src_keys if !(k in (:n_layers, :update_pair_repr, :output_param))], dst_keys)
+        missing_in_dst = setdiff([k for k in src_keys if !(k in (:n_layers, :update_pair_repr, :output_param)) && src[k] !== nothing], dst_keys)
         mismatches = String[]
         !isempty(missing_in_src) && push!(mismatches, "model has fields not in checkpoint: $(missing_in_src)")
         !isempty(missing_in_dst) && push!(mismatches, "checkpoint has fields not in model: $(missing_in_dst)")
